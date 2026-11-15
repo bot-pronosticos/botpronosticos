@@ -95,10 +95,14 @@ def main():
     # Notificación de arranque a Telegram
     bank = get_current_bankroll()
     send_telegram_raw(
-        f"🚀 *Sistema de Pronósticos Iniciado en la Nube*\n\n"
-        f"• Estado: `24/7 Activo`\n"
-        f"• Banca actual: `${bank:.2f}`\n"
-        f"• Botones de registro listos en cada pick."
+        f"🚀 *Sistema de Pronósticos Activo en la Nube*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"• Estado: `24/7 Operativo (Render)`\n"
+        f"• Banca sincronizada: `${bank:,.2f}`\n"
+        f"• Inspección diaria: `07:00 y 13:00 UTC`\n"
+        f"• Liquidación automática: `23:30 UTC`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Escribe `/picks` para ver la jornada de hoy o `/help` para ver comandos."
     )
 
     # 3. Bot interactivo de Telegram en hilo principal (escucha comandos y botones)

@@ -1,7 +1,7 @@
 """
 scripts/check_results.py
-Fase 4: Feedback Loop & Verificación Automática de Resultados.
-- Si el usuario pulsó '✅ Aposté a esta' -> Actualiza el bankroll real y notifica ganancia/pérdida.
+Fase 4: Feedback Loop & Liquidación Automática de Resultados.
+- Si el usuario pulsó '✅ Aposté a esta' -> Actualiza el bankroll real en Supabase y notifica ganancia/pérdida en hilo.
 - Si el usuario pulsó '⏭️ No aposté' o no pulsó -> Notifica si acertó o falló pero mantiene el bankroll intacto.
 """
 import sys
@@ -13,7 +13,8 @@ from loguru import logger
 
 from harvesters.db_client import select, update
 from bot.telegram_notifier import (
-    notify_pick_result, send_telegram_raw, get_current_bankroll, update_bankroll, get_pick_placed_status
+    notify_pick_result, send_telegram_raw, get_current_bankroll, update_bankroll,
+    get_pick_placed_status, get_pick_telegram_msg
 )
 
 
@@ -95,7 +96,7 @@ def check_and_settle():
             final_bank = update_bankroll(ganancia)
             net_units += ganancia
         else:
-            final_bank = current_bank  # Banca intacta
+            final_bank = current_bank
 
         # Actualizar estado en Supabase
         update("picks", {
@@ -105,7 +106,7 @@ def check_and_settle():
         }, {"id": pick_id})
 
         score_text = f"{local} {gl} - {gv} {visitante}"
-        tg_id = pick.get("telegram_message_id")
+        tg_id = get_pick_telegram_msg(pick_id)
 
         # Notificar en hilo a Telegram
         notify_pick_result(
