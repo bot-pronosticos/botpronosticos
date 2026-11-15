@@ -1,16 +1,25 @@
 """
 bot/formatter.py
 Formato limpio y profesional para pantalla de smartphone:
-- Jerarquía visual clara: Liga + Hora, Equipos, Pronóstico + Cuota, Stake + Confianza, Análisis clave.
+- Jerarquía visual clara: Icono de Deporte + Liga + Hora, Equipos, Pronóstico + Cuota, Stake + Confianza, Análisis clave.
+- Soporte multideporte (Fútbol, NBA, NFL).
 - Cero relleno ni saturación visual.
 """
+
+SPORT_ICONS = {
+    "football":   "⚽",
+    "basketball": "🏀",
+    "americano":  "🏈",
+}
 
 
 def format_pick_message(pick: dict, bankroll: float = 100.0) -> str:
     """
     Formato profesional de lectura rápida en móvil.
     """
-    liga          = pick.get("liga", "Fútbol")
+    sport         = pick.get("deporte", "football")
+    icon          = SPORT_ICONS.get(sport, "🎯")
+    liga          = pick.get("liga", "Deportes")
     local         = pick.get("equipo_local", "Local")
     visitante     = pick.get("equipo_visitante", "Visitante")
     ko_lbl        = pick.get("kickoff_label", "")
@@ -28,7 +37,7 @@ def format_pick_message(pick: dict, bankroll: float = 100.0) -> str:
     stake_val = max(stake_val, 1.0)
     stake_pct = (stake_val / bankroll * 100) if bankroll > 0 else 2.0
 
-    header_line = f"⚽ *{liga}*" + (f" · 🕒 *{ko_lbl}*" if ko_lbl else "")
+    header_line = f"{icon} *{liga}*" + (f" · 🕒 *{ko_lbl}*" if ko_lbl else "")
 
     msg = (
         f"{header_line}\n"

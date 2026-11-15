@@ -22,19 +22,22 @@ BASE_URL   = "https://api.the-odds-api.com/v4"
 CACHE_FILE = DATA_DIR / "odds_cache.json"
 CACHE_TTL_MINUTES = 120  # Refresca cada 2 horas para ahorrar requests
 
-# Deportes y mercados que monitoreamos
+# Deportes y mercados prioritarios optimizados para el free tier (500 req/mes)
 SPORTS_CONFIG = {
-    "soccer_epl":          {"name": "Premier League",  "deporte": "football"},
-    "soccer_spain_la_liga":{"name": "LaLiga",           "deporte": "football"},
-    "soccer_italy_serie_a":{"name": "Serie A",          "deporte": "football"},
-    "soccer_germany_bundesliga": {"name": "Bundesliga", "deporte": "football"},
-    "soccer_france_ligue_one":   {"name": "Ligue 1",    "deporte": "football"},
-    "soccer_uefa_champs_league": {"name": "Champions",  "deporte": "football"},
-    "basketball_nba":      {"name": "NBA",              "deporte": "basketball"},
-    "americanfootball_nfl":{"name": "NFL",              "deporte": "americano"},
+    # Fútbol Top
+    "soccer_epl":                  {"name": "Premier League",      "deporte": "football"},
+    "soccer_spain_la_liga":        {"name": "LaLiga",              "deporte": "football"},
+    "soccer_uefa_champs_league":   {"name": "Champions League",    "deporte": "football"},
+    "soccer_uefa_nations_league":  {"name": "UEFA Nations League", "deporte": "football"},
+    "soccer_italy_serie_a":        {"name": "Serie A",             "deporte": "football"},
+    "soccer_germany_bundesliga":   {"name": "Bundesliga",          "deporte": "football"},
+    # Baloncesto & Americano (alta frecuencia y fines de semana)
+    "basketball_nba":              {"name": "NBA",                 "deporte": "basketball"},
+    "americanfootball_nfl":        {"name": "NFL",                 "deporte": "americano"},
 }
 
-MARKETS = ["h2h", "totals", "spreads"]
+# Monitoreamos h2h para maximizar la cobertura deportiva dentro del free tier
+MARKETS = ["h2h"]
 
 
 def _load_cache() -> dict:
@@ -71,7 +74,7 @@ def _fetch_odds(sport: str, market: str) -> list[dict]:
     """Llama a The Odds API para un deporte y mercado específico."""
     params = {
         "apiKey":  ODDS_API_KEY,
-        "regions": "eu,uk",        # Bookmakers europeos — mejores cuotas
+        "regions": "eu,us",        # Soporta Pinnacle, 1xBet, Betfair, DraftKings
         "markets": market,
         "oddsFormat": "decimal",
         "dateFormat": "iso",

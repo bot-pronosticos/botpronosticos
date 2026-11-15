@@ -1,13 +1,12 @@
 """
 bot/bot_service.py
-Servicio de bot interactivo de Telegram de alta precisión y experiencia profesional:
-- /picks: Inspección diaria estricta (partidos de hoy / próximas 24h).
-- /proximos: Pronósticos anticipados de la próxima jornada (cuando no hay partidos hoy).
-- /bankroll: Consulta de saldo y gestión de riesgo.
-- /setbank <monto>: Fijar nuevo capital de banca.
-- /stats: Rendimiento acumulado del modelo.
-- Deduplicación estricta contra Supabase para no repetir cuotas.
-- Botones interactivos con respuesta táctil y persistencia en Supabase.
+Servicio interactivo de Telegram multideporte (Fútbol, NBA, NFL):
+- /picks: Pronósticos con valor matemático para hoy (ventana 24h).
+- /proximos: Pronósticos de la próxima jornada (hasta 7 días).
+- /bankroll: Saldo y gestión de riesgo.
+- /setbank: Fijar nuevo capital.
+- /stats: Rendimiento acumulado.
+- Cero repeticiones de cuotas gracias a deduplicación en Supabase.
 """
 import sys
 from pathlib import Path
@@ -29,7 +28,7 @@ from bot.telegram_notifier import (
 )
 from harvesters.db_client import select, insert, update
 from ml.data_loader import load_all_history
-from ml.predictor import predict_upcoming, get_earliest_future_fixture, format_kickoff_label
+from ml.predictor import predict_upcoming, format_kickoff_label
 
 _history_cache = None
 
@@ -37,7 +36,11 @@ _history_cache = None
 def get_cached_history():
     global _history_cache
     if _history_cache is None:
-        _history_cache = load_all_history()
+        try:
+            _history_cache = load_all_history()
+        except Exception as e:
+            logger.warning(f"Error cargando historial de fútbol: {e}")
+            _history_cache = None
     return _history_cache
 
 
@@ -45,14 +48,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user.first_name
     text = (
         f"👋 *Hola {user}*\n\n"
-        f"🤖 *Bot de Pronósticos Deportivos · Modelo ML EV+*\n"
+        f"🤖 *Bot de Pronósticos Multideporte · Modelo ML EV+*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Cuotas de referencia: *Pinnacle / 1xBet*\n"
+        f"• Cobertura: *Fútbol (Ligas Top & UEFA) + NBA*\n"
+        f"• Cuotas de referencia: *Pinnacle / 1xBet / DraftKings*\n"
         f"• Rango estricto de cuotas: `1.45 a 2.45`\n"
-        f"• Probabilidad calibrada mínima: `44%`\n"
         f"• Gestión de riesgo: `Quarter Kelly (máx 4% por pick)`\n\n"
         f"📌 *Comandos Disponibles:*\n"
-        f"• `/picks` — Pronósticos con valor para *hoy*\n"
+        f"• `/picks` — Pronósticos de la jornada de *hoy*\n"
         f"• `/proximos` — Pronósticos anticipados de la próxima fecha\n"
         f"• `/bankroll` — Consultar saldo actual de tu banca\n"
         f"• `/setbank 500` — Establecer o reiniciar tu banca\n"
@@ -65,11 +68,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Inspección diaria estricta: solo partidos de hoy (próximas 24 horas).
-    Deduplica contra Supabase para jamás repetir cuotas ya enviadas.
+    Inspección diaria: partidos de hoy (próximas 24h).
     """
     wait_msg = await update.message.reply_text(
-        "🔍 *Inspeccionando partidos de hoy en Pinnacle / 1xBet...*", parse_mode="Markdown"
+        "🔍 *Inspeccionando partidos de hoy (Fútbol y NBA)...*", parse_mode="Markdown"
     )
 
     try:
@@ -78,26 +80,17 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await wait_msg.delete()
 
-        # Si no hay partidos hoy (ej: parón FIFA o descanso entre semana)
         if not today_picks:
-            earliest = get_earliest_future_fixture("football")
-            next_txt = ""
-            if earliest:
-                ko_lbl = format_kickoff_label(earliest.get("kickoff"))
-                next_txt = (
-                    f"\n📅 *Próxima jornada con partidos:*\n"
-                    f"• {earliest.get('equipo_local')} vs {earliest.get('equipo_visitante')} ({ko_lbl})\n\n"
-                    f"👉 Usa `/proximos` para ver los pronósticos anticipados de esa fecha."
-                )
             await update.message.reply_text(
-                f"📭 *Sin partidos para hoy*\n\n"
-                f"Las 5 grandes ligas europeas no tienen encuentros programados para hoy en el horario habitual.\n"
-                f"{next_txt}",
+                "📭 *Sin pronósticos de alto valor para hoy*\n\n"
+                "El modelo evaluó la jornada de hoy pero ningún encuentro supera los filtros "
+                "estrictos de valor (cuota 1.45–2.45 · EV positivo · prob ≥ 44%).\n\n"
+                "🛡️ *Disciplina:* No forzamos apuestas cuando no existe ventaja matemática sobre la casa.\n"
+                "👉 Si deseas consultar partidos de los próximos días, escribe `/proximos`.",
                 parse_mode="Markdown"
             )
             return
 
-        # Deduplicar: omitir picks que ya se enviaron antes a Telegram
         already_sent = get_already_sent_keys()
         new_picks = [
             p for p in today_picks
@@ -114,11 +107,10 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Enviar los picks nuevos de hoy
         picks_to_send = new_picks[:3]
         await update.message.reply_text(
             f"🎯 *{len(picks_to_send)} pronóstico(s) con valor para hoy*\n"
-            f"_Referencia: Pinnacle / 1xBet · Modelo EV+_",
+            f"_Referencia: Pinnacle / 1xBet · Criterio EV+_",
             parse_mode="Markdown"
         )
 
@@ -147,8 +139,6 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("⏭️ No aposté",    callback_data=f"bet_skipped:{pick_id}")
             ]])
             sent_msg = await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
-
-            # Persistir en Supabase api_usage (sobrevive reinicios de Render)
             save_pick_meta(pick_id=pick_id, msg_id=sent_msg.message_id)
 
     except Exception as e:
@@ -162,7 +152,7 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def proximos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Permite consultar pronósticos anticipados de los próximos 7 días.
+    Pronósticos anticipados de los próximos 7 días.
     """
     wait_msg = await update.message.reply_text(
         "📅 *Consultando pronósticos anticipados de la próxima fecha...*", parse_mode="Markdown"
@@ -240,9 +230,7 @@ async def proximos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_bet_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manejo de clics con respuesta táctil inmediata."""
     query = update.callback_query
-
     data = query.data
     if ":" not in data:
         await query.answer()
@@ -349,10 +337,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(application):
-    """Registra el menú de comandos oficial de Telegram."""
     from telegram import BotCommand
     commands = [
-        BotCommand("picks",    "🎯 Pronósticos de hoy (inspección diaria)"),
+        BotCommand("picks",    "🎯 Pronósticos de hoy (Fútbol & NBA)"),
         BotCommand("proximos", "📅 Pronósticos anticipados próxima jornada"),
         BotCommand("bankroll", "💼 Consultar saldo de banca actual"),
         BotCommand("setbank",  "💵 Configurar monto de banca (ej: /setbank 500)"),

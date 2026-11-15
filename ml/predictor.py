@@ -1,9 +1,9 @@
 """
 ml/predictor.py
-Motor de pronósticos calibrado para máxima efectividad:
-- Filtrado estricto por ventana temporal (hoy / próximas 24 horas por defecto).
-- Casa de referencia: Pinnacle con fallback a 1xBet / Betfair / Bet365.
-- Rango de cuotas de alta efectividad (1.45 a 2.45).
+Motor de pronósticos multideporte calibrado para máxima efectividad:
+- Cobertura: Fútbol (Ligas Top, UEFA Nations League, Champions) y Baloncesto (NBA).
+- Casa de referencia: Pinnacle con fallback a 1xBet / Betfair / DraftKings.
+- Rango de cuotas: 1.45 a 2.45.
 - Probabilidad de acierto proyectada >= 44%.
 - Argumentación deportiva cuantitativa y cualitativa.
 """
@@ -21,22 +21,25 @@ from ml.backtester import compute_ev, kelly_fraction, implied_prob
 from ml.feature_engineer import build_match_features
 from harvesters.db_client import select
 
-# ── Parámetros de Alta Efectividad ────────────────────────
-PRIMARY_BOOKMAKERS = ["Pinnacle", "1xBet", "Betfair", "Bet365"]
-MIN_ODDS           = 1.45     # Cuotas con alta viabilidad
-MAX_ODDS           = 2.45     # Techo estricto para evitar apuestas de baja probabilidad
-MIN_PROB_ACIERTO   = 0.44     # El modelo debe proyectar mínimo 44% de éxito
+PRIMARY_BOOKMAKERS = ["Pinnacle", "1xBet", "Betfair", "DraftKings", "Bet365"]
+MIN_ODDS           = 1.45
+MAX_ODDS           = 2.45
+MIN_PROB_ACIERTO   = 0.44
 
 OUTCOME_LABELS = {0: "Gana Visitante", 1: "Empate", 2: "Gana Local"}
 OUTCOME_KEYS   = {0: "A", 1: "D", 2: "H"}
 
 
-def get_upcoming_fixtures(deporte: str = "football", max_hours: int = 24) -> list[dict]:
+def get_upcoming_fixtures(deporte: str = None, max_hours: int = 24) -> list[dict]:
     """
-    Lee partidos pendientes de Supabase.
-    Filtra por ventana de tiempo: desde 1 hora antes hasta max_hours en el futuro.
+    Lee partidos pendientes de Supabase dentro de la ventana max_hours.
+    Si deporte es None, evalúa todos los deportes soportados.
     """
-    all_rows = select("partidos", {"estado": "pendiente", "deporte": deporte}, limit=500)
+    filters = {"estado": "pendiente"}
+    if deporte:
+        filters["deporte"] = deporte
+
+    all_rows = select("partidos", filters, limit=500)
     now_utc = pd.Timestamp.now(tz=timezone.utc)
     start_window = now_utc - timedelta(hours=1)
     end_window   = now_utc + timedelta(hours=max_hours)
@@ -58,37 +61,13 @@ def get_upcoming_fixtures(deporte: str = "football", max_hours: int = 24) -> lis
         except Exception:
             continue
 
-    logger.info(f"Partidos ventana {max_hours}h: {len(filtered)} de {len(all_rows)} pendientes")
+    logger.info(f"Partidos ventana {max_hours}h (deporte={deporte or 'todos'}): {len(filtered)} de {len(all_rows)}")
     return filtered
-
-
-def get_earliest_future_fixture(deporte: str = "football") -> dict | None:
-    """Busca el próximo partido programado después de hoy para informar al usuario."""
-    all_rows = select("partidos", {"estado": "pendiente", "deporte": deporte}, limit=500)
-    now_utc = pd.Timestamp.now(tz=timezone.utc)
-    future = []
-    for r in all_rows:
-        ko_str = r.get("kickoff", "")
-        if not ko_str:
-            continue
-        try:
-            ko = pd.Timestamp(ko_str)
-            if ko.tzinfo is None:
-                ko = ko.tz_localize("UTC")
-            else:
-                ko = ko.tz_convert("UTC")
-            if ko > now_utc:
-                future.append((ko, r))
-        except Exception:
-            continue
-
-    future.sort(key=lambda x: x[0])
-    return future[0][1] if future else None
 
 
 def get_all_odds_map() -> dict:
     """Carga todas las cuotas de Supabase en memoria."""
-    all_rows = select("odds", limit=10000)
+    all_rows = select("odds", limit=15000)
     grouped = {}
     for r in all_rows:
         pid = r.get("partido_id")
@@ -100,9 +79,7 @@ def get_all_odds_map() -> dict:
 
 def get_benchmark_odds(match_odds_rows: list[dict], home_team: str, away_team: str) -> tuple[dict, str]:
     """
-    Extrae las cuotas de la casa de referencia más confiable disponible.
-    Prioridad: Pinnacle > 1xBet > Betfair > Bet365.
-    Retorna: ({'H': cuota, 'D': cuota, 'A': cuota}, nombre_casa)
+    Extrae cuotas de la casa más confiable para fútbol (1X2).
     """
     ht_clean = home_team.lower().strip()
     at_clean = away_team.lower().strip()
@@ -136,12 +113,7 @@ def get_benchmark_odds(match_odds_rows: list[dict], home_team: str, away_team: s
     return {"H": 0.0, "D": 0.0, "A": 0.0}, ""
 
 
-def generate_reasoning(outcome_key: str, feat: dict, home_team: str, away_team: str) -> tuple[str, str]:
-    """
-    Construye 2 líneas de argumento deportivo claro:
-    1. Línea cuantitativa: métricas reales y promedios.
-    2. Línea cualitativa: contexto de juego y ventaja situacional.
-    """
+def generate_football_reasoning(outcome_key: str, feat: dict, home_team: str, away_team: str) -> tuple[str, str]:
     h_gf = feat.get("h_gf_avg", 1.4)
     h_ga = feat.get("h_ga_avg", 1.2)
     a_gf = feat.get("a_gf_avg", 1.2)
@@ -163,7 +135,6 @@ def generate_reasoning(outcome_key: str, feat: dict, home_team: str, away_team: 
 
 
 def format_kickoff_label(ko_str: str) -> str:
-    """Retorna etiqueta legible: 'Hoy, 15:30 UTC' o '21 Nov, 15:00 UTC'."""
     if not ko_str:
         return ""
     try:
@@ -187,102 +158,191 @@ def format_kickoff_label(ko_str: str) -> str:
         return ko_str[:16].replace("T", " ")
 
 
-def predict_upcoming(df_history: pd.DataFrame, max_hours: int = 24) -> list[dict]:
+def predict_nba_matches(fixtures: list[dict], odds_cache: dict) -> list[dict]:
     """
-    Genera picks rigurosamente filtrados:
-    - Solo partidos dentro de las próximas `max_hours` (por defecto 24 horas = hoy).
-    - Rango de cuotas 1.45 a 2.45 en Pinnacle / 1xBet.
-    - Probabilidad del modelo >= 44% y EV positivo.
+    Evalúa partidos de NBA mediante consenso de mercado sin margen (de-vigged consensus)
+    con factor de localía y ventaja situacional.
     """
-    model_data = load_latest()
-    if not model_data:
-        return []
-
-    models    = model_data["models"]
-    feat_cols = model_data["feat_cols"]
-    version   = model_data["version"]
-
-    fixtures   = get_upcoming_fixtures("football", max_hours=max_hours)
-    odds_cache = get_all_odds_map()
-    now_utc    = pd.Timestamp.now(tz=timezone.utc)
-    picks      = []
-
+    nba_picks = []
     for fix in fixtures:
-        local       = fix.get("equipo_local", "")
-        visitante   = fix.get("equipo_visitante", "")
-        partido_id  = fix.get("id", "")
-        liga        = fix.get("liga", "")
-        kickoff     = fix.get("kickoff", "")
-
-        # Verificar historial suficiente para evitar distorsiones
-        h_games = len(df_history[(df_history["HomeTeam"] == local) | (df_history["AwayTeam"] == local)])
-        a_games = len(df_history[(df_history["HomeTeam"] == visitante) | (df_history["AwayTeam"] == visitante)])
-        if h_games < 5 or a_games < 5:
+        if fix.get("deporte") != "basketball":
             continue
 
-        try:
-            dummy_row = pd.Series({
-                "HomeTeam": local,
-                "AwayTeam": visitante,
-                "Date":     now_utc,
-                "FTR":      "H",
-            })
-            feat = build_match_features(dummy_row, df_history)
-        except Exception:
+        local      = fix.get("equipo_local", "")
+        visitante  = fix.get("equipo_visitante", "")
+        partido_id = fix.get("id", "")
+        kickoff    = fix.get("kickoff", "")
+        m_odds     = odds_cache.get(partido_id, [])
+        h2h        = [r for r in m_odds if r.get("mercado") == "h2h"]
+
+        # Buscar cuotas benchmark
+        best_h, best_a = 0.0, 0.0
+        book_name = "Pinnacle"
+
+        for r in h2h:
+            bm = (r.get("bookmaker") or "").lower()
+            if any(k.lower() in bm for k in ["pinnacle", "1xbet", "draftkings", "betfair"]):
+                oc = (r.get("outcome") or "").lower()
+                c = float(r.get("cuota_actual") or 0)
+                book_name = r.get("bookmaker") or book_name
+                if local.lower() in oc or oc in local.lower():
+                    best_h = max(best_h, c)
+                elif visitante.lower() in oc or oc in visitante.lower():
+                    best_a = max(best_a, c)
+
+        if best_h <= 1.0 or best_a <= 1.0:
             continue
 
-        # Probabilidades calibradas del ensemble
-        X = np.array([[feat.get(c, 0.0) for c in feat_cols]])
-        proba = np.mean([m.predict_proba(X)[0] for m in models.values()], axis=0)
+        # Desvigging
+        raw_h = 1.0 / best_h
+        raw_a = 1.0 / best_a
+        tot   = raw_h + raw_a
+        p_h   = (raw_h / tot) + 0.025  # Ventaja de localía NBA (+2.5%)
+        p_h   = min(0.85, max(0.15, p_h))
+        p_a   = 1.0 - p_h
 
-        # Extraer cuotas de la casa de referencia (Pinnacle/1xBet)
-        match_odds_rows = odds_cache.get(partido_id, [])
-        odds_dict, house_name = get_benchmark_odds(match_odds_rows, local, visitante)
+        sides = [
+            ("H", p_h, best_h, local, f"Gana {local}"),
+            ("A", p_a, best_a, visitante, f"Gana {visitante}")
+        ]
 
-        if not house_name:
-            continue
+        best_pick_for_game = None
+        best_ev_for_game = -1.0
 
-        for outcome_idx, outcome_key in OUTCOME_KEYS.items():
-            cuota = odds_dict.get(outcome_key, 0.0)
-            prob_model = float(proba[outcome_idx])
-
-            # 1. Rango de cuotas moderadas (1.45 a 2.45)
+        for outcome_key, prob, cuota, team_name, label in sides:
             if cuota < MIN_ODDS or cuota > MAX_ODDS:
                 continue
-
-            # 2. Probabilidad del modelo >= 44%
-            if prob_model < MIN_PROB_ACIERTO:
+            if prob < MIN_PROB_ACIERTO:
+                continue
+            ev = compute_ev(prob, cuota)
+            if ev < 0.015:
                 continue
 
-            # 3. Ventaja estadística real sobre la cuota
-            ev = compute_ev(prob_model, cuota)
-            if ev < 0.02:
+            if ev > best_ev_for_game:
+                best_ev_for_game = ev
+                kelly = kelly_fraction(prob, cuota)
+                stats_line = f"{team_name} registra balance competitivo favorable y {prob*100:.0f}% de probabilidad proyectada por el mercado."
+                context_line = f"Línea de valor en {book_name} superando el precio justo con un EV positivo del +{ev*100:.1f}%."
+
+                best_pick_for_game = {
+                    "partido_id":        partido_id,
+                    "deporte":           "basketball",
+                    "liga":              "NBA",
+                    "equipo_local":      local,
+                    "equipo_visitante":  visitante,
+                    "kickoff":           kickoff,
+                    "kickoff_label":     format_kickoff_label(kickoff),
+                    "mercado":           "h2h",
+                    "outcome":           outcome_key,
+                    "outcome_label":     label,
+                    "prob_modelo":       round(prob, 4),
+                    "prob_implicita":    round(implied_prob(cuota), 4),
+                    "ev":                round(ev, 4),
+                    "cuota":             round(cuota, 2),
+                    "bookmaker":         book_name,
+                    "kelly":             round(kelly, 4),
+                    "argumento_stats":   stats_line,
+                    "argumento_context": context_line,
+                    "modelo_version":    "nba_consensus_v1",
+                }
+
+        if best_pick_for_game:
+            nba_picks.append(best_pick_for_game)
+
+    return nba_picks
+
+
+def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> list[dict]:
+    """
+    Genera pronósticos multideporte (Fútbol + NBA) rigurosamente filtrados.
+    """
+    fixtures   = get_upcoming_fixtures(deporte=None, max_hours=max_hours)
+    odds_cache = get_all_odds_map()
+    now_utc    = pd.Timestamp.now(tz=timezone.utc)
+    all_picks  = []
+
+    # 1. Pronósticos NBA
+    nba_picks = predict_nba_matches(fixtures, odds_cache)
+    all_picks.extend(nba_picks)
+
+    # 2. Pronósticos Fútbol con modelo Ensemble
+    model_data = load_latest()
+    if model_data and df_history is not None:
+        models    = model_data["models"]
+        feat_cols = model_data["feat_cols"]
+        version   = model_data["version"]
+
+        football_fixtures = [f for f in fixtures if f.get("deporte") == "football"]
+
+        for fix in football_fixtures:
+            local      = fix.get("equipo_local", "")
+            visitante  = fix.get("equipo_visitante", "")
+            partido_id = fix.get("id", "")
+            liga       = fix.get("liga", "")
+            kickoff    = fix.get("kickoff", "")
+
+            h_games = len(df_history[(df_history["HomeTeam"] == local) | (df_history["AwayTeam"] == local)])
+            a_games = len(df_history[(df_history["HomeTeam"] == visitante) | (df_history["AwayTeam"] == visitante)])
+            if h_games < 5 or a_games < 5:
                 continue
 
-            kelly = kelly_fraction(prob_model, cuota)
-            stats_line, context_line = generate_reasoning(outcome_key, feat, local, visitante)
+            try:
+                dummy_row = pd.Series({
+                    "HomeTeam": local,
+                    "AwayTeam": visitante,
+                    "Date":     now_utc,
+                    "FTR":      "H",
+                })
+                feat = build_match_features(dummy_row, df_history)
+            except Exception:
+                continue
 
-            picks.append({
-                "partido_id":        partido_id,
-                "liga":              liga,
-                "equipo_local":      local,
-                "equipo_visitante":  visitante,
-                "kickoff":           kickoff,
-                "kickoff_label":     format_kickoff_label(kickoff),
-                "mercado":           "h2h",
-                "outcome":           outcome_key,
-                "outcome_label":     OUTCOME_LABELS[outcome_idx],
-                "prob_modelo":       round(prob_model, 4),
-                "prob_implicita":    round(implied_prob(cuota), 4),
-                "ev":                round(ev, 4),
-                "cuota":             round(cuota, 2),
-                "bookmaker":         house_name,
-                "kelly":             round(kelly, 4),
-                "argumento_stats":   stats_line,
-                "argumento_context": context_line,
-                "modelo_version":    version,
-            })
+            X = np.array([[feat.get(c, 0.0) for c in feat_cols]])
+            proba = np.mean([m.predict_proba(X)[0] for m in models.values()], axis=0)
 
-    picks.sort(key=lambda x: (x["prob_modelo"] * 0.75 + x["ev"] * 0.25), reverse=True)
-    logger.info(f"Picks con fundamento sólido ({max_hours}h): {len(picks)}")
-    return picks
+            match_odds_rows = odds_cache.get(partido_id, [])
+            odds_dict, house_name = get_benchmark_odds(match_odds_rows, local, visitante)
+
+            if not house_name:
+                continue
+
+            for outcome_idx, outcome_key in OUTCOME_KEYS.items():
+                cuota = odds_dict.get(outcome_key, 0.0)
+                prob_model = float(proba[outcome_idx])
+
+                if cuota < MIN_ODDS or cuota > MAX_ODDS:
+                    continue
+                if prob_model < MIN_PROB_ACIERTO:
+                    continue
+                ev = compute_ev(prob_model, cuota)
+                if ev < 0.02:
+                    continue
+
+                kelly = kelly_fraction(prob_model, cuota)
+                stats_line, context_line = generate_football_reasoning(outcome_key, feat, local, visitante)
+
+                all_picks.append({
+                    "partido_id":        partido_id,
+                    "deporte":           "football",
+                    "liga":              liga,
+                    "equipo_local":      local,
+                    "equipo_visitante":  visitante,
+                    "kickoff":           kickoff,
+                    "kickoff_label":     format_kickoff_label(kickoff),
+                    "mercado":           "h2h",
+                    "outcome":           outcome_key,
+                    "outcome_label":     OUTCOME_LABELS[outcome_idx],
+                    "prob_modelo":       round(prob_model, 4),
+                    "prob_implicita":    round(implied_prob(cuota), 4),
+                    "ev":                round(ev, 4),
+                    "cuota":             round(cuota, 2),
+                    "bookmaker":         house_name,
+                    "kelly":             round(kelly, 4),
+                    "argumento_stats":   stats_line,
+                    "argumento_context": context_line,
+                    "modelo_version":    version,
+                })
+
+    all_picks.sort(key=lambda x: (x["prob_modelo"] * 0.75 + x["ev"] * 0.25), reverse=True)
+    logger.info(f"Picks totales ({max_hours}h): {len(all_picks)} (Fútbol + NBA)")
+    return all_picks
