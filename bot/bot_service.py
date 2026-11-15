@@ -187,10 +187,11 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def proximos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Pronósticos anticipados de los próximos 7 días.
+    Pronósticos anticipados (próximos 7 días) — solo preview, NO guarda en picks table.
+    Así el auto-scanner puede enviar la tarjeta real el día del partido sin deduplicar.
     """
     wait_msg = await update.message.reply_text(
-        "📅 *Consultando pronósticos anticipados de la próxima fecha...*", parse_mode="Markdown"
+        "📅 *Consultando pronósticos de los próximos 7 días...*", parse_mode="Markdown"
     )
     try:
         df_hist = get_cached_history()
@@ -200,60 +201,39 @@ async def proximos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not future_picks:
             await update.message.reply_text(
-                "📭 *Sin pronósticos programados*\n\n"
-                "No hay partidos con cuotas de referencia en los próximos 7 días.",
+                "📭 *Sin pronósticos en los próximos 7 días*\n\n"
+                "No hay partidos con cuotas de referencia disponibles aún.",
                 parse_mode="Markdown"
             )
             return
 
-        already_sent = get_already_sent_keys()
-        new_picks = [
+        # Excluir picks de hoy (esos los maneja el auto-scanner, no /proximos)
+        now_utc = pd.Timestamp.now(tz="UTC")
+        future_only = [
             p for p in future_picks
-            if (p["partido_id"], p["mercado"], p["outcome"]) not in already_sent
+            if pd.Timestamp(p["kickoff"]).tz_convert("UTC") > now_utc + pd.Timedelta(hours=24)
         ]
 
-        if not new_picks:
+        if not future_only:
             await update.message.reply_text(
-                "✅ *Pronósticos de la próxima fecha al día*\n\n"
-                "Los pronósticos de la próxima jornada ya fueron emitidos en el chat.",
+                "📭 *Sin partidos anticipados disponibles*\n\n"
+                "Solo hay partidos de hoy — esos llegan solos via el escaneo automático.",
                 parse_mode="Markdown"
             )
             return
 
-        picks_to_send = new_picks[:3]
         await update.message.reply_text(
-            f"📅 *PRONÓSTICOS ANTICIPADOS (Próxima Jornada)*\n"
+            f"📅 *ANTICIPOS — Próximos 7 días* ({len(future_only[:5])} picks)\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"⚠️ _Nota: Estos partidos se disputan en los próximos días. Las cuotas y alineaciones pueden presentar variaciones._",
+            f"⚠️ _Vista previa: las tarjetas definitivas llegarán solas el día del partido con cuotas actualizadas._",
             parse_mode="Markdown"
         )
 
         current_bank = get_current_bankroll()
-        for p in picks_to_send:
+        for p in future_only[:5]:
+            # Solo mandamos la tarjeta formateada — SIN insertar en picks table
             msg = format_pick_message(p, bankroll=current_bank)
-
-            pick_record = {
-                "partido_id":     p["partido_id"],
-                "mercado":        p["mercado"],
-                "outcome":        p["outcome"],
-                "prob_modelo":    p["prob_modelo"],
-                "prob_implicita": p["prob_implicita"],
-                "ev":             p["ev"],
-                "cuota":          p["cuota"],
-                "bookmaker":      p["bookmaker"],
-                "kelly_fraccion": p["kelly"],
-            }
-            res = insert("picks", [pick_record])
-            if not res:
-                continue
-
-            pick_id = res[0]["id"]
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Aposté a esta", callback_data=f"bet_placed:{pick_id}"),
-                InlineKeyboardButton("⏭️ No aposté",    callback_data=f"bet_skipped:{pick_id}")
-            ]])
-            sent_msg = await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
-            save_pick_meta(pick_id=pick_id, msg_id=sent_msg.message_id)
+            await update.message.reply_text(msg, parse_mode="Markdown")
 
     except Exception as e:
         logger.error(f"Error en /proximos: {e}")

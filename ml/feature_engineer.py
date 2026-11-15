@@ -18,8 +18,20 @@ def compute_rolling_team_stats(df: pd.DataFrame, team: str,
     Calcula stats rolling de un equipo antes de una fecha específica.
     Usa tanto partidos de local como visitante.
     """
-    home_mask = (df["HomeTeam"] == team) & (df["Date"] < before_date)
-    away_mask = (df["AwayTeam"] == team) & (df["Date"] < before_date)
+    if before_date is not None:
+        if getattr(before_date, "tzinfo", None) is None:
+            before_date = pd.Timestamp(before_date).tz_localize("UTC")
+        else:
+            before_date = pd.Timestamp(before_date).tz_convert("UTC")
+
+    df_dates = df["Date"]
+    if getattr(df_dates.dt, "tz", None) is None:
+        df_dates = df_dates.dt.tz_localize("UTC")
+    else:
+        df_dates = df_dates.dt.tz_convert("UTC")
+
+    home_mask = (df["HomeTeam"] == team) & (df_dates < before_date)
+    away_mask = (df["AwayTeam"] == team) & (df_dates < before_date)
 
     home_games = df[home_mask].tail(n)
     away_games = df[away_mask].tail(n)
@@ -100,10 +112,24 @@ def build_match_features(row: pd.Series, df: pd.DataFrame) -> dict:
     a_stats = compute_rolling_team_stats(df, away, date, n=10)
 
     # H2H últimos 5 enfrentamientos
+    if date is not None:
+        if getattr(date, "tzinfo", None) is None:
+            date_utc = pd.Timestamp(date).tz_localize("UTC")
+        else:
+            date_utc = pd.Timestamp(date).tz_convert("UTC")
+    else:
+        date_utc = pd.Timestamp.now(tz="UTC")
+
+    df_dates = df["Date"]
+    if getattr(df_dates.dt, "tz", None) is None:
+        df_dates = df_dates.dt.tz_localize("UTC")
+    else:
+        df_dates = df_dates.dt.tz_convert("UTC")
+
     h2h_mask = (
         ((df["HomeTeam"] == home) & (df["AwayTeam"] == away)) |
         ((df["HomeTeam"] == away) & (df["AwayTeam"] == home))
-    ) & (df["Date"] < date)
+    ) & (df_dates < date_utc)
     h2h = df[h2h_mask].tail(5)
     h2h_home_wins = 0
     if len(h2h) > 0:

@@ -101,16 +101,16 @@ def main():
     scheduler.add_job(job_harvest, CronTrigger(hour="0,6,12,18", minute="15"))
 
     # Escaneo + envío automático de picks:
-    # 08:00 UTC → picks para partidos de tarde/noche de Europa
+    # 10:00 UTC (05:00 COL) → picks europeos del día
     scheduler.add_job(
         job_auto_scan_and_send,
-        CronTrigger(hour="8", minute="0"),
+        CronTrigger(hour="10", minute="0"),
         kwargs={"window_label": "mañana"}
     )
-    # 14:00 UTC → picks para partidos nocturnos (NBA, NFL, Europa tarde)
+    # 17:00 UTC (12:00 COL) → picks NBA nocturnos + Europa tarde
     scheduler.add_job(
         job_auto_scan_and_send,
-        CronTrigger(hour="14", minute="0"),
+        CronTrigger(hour="17", minute="0"),
         kwargs={"window_label": "tarde"}
     )
 
@@ -127,7 +127,7 @@ def main():
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"• Estado: `24/7 Operativo (Render)`\n"
         f"• Banca sincronizada: `${bank:,.2f}`\n"
-        f"• Escaneo automático: `08:00 y 14:00 UTC`\n"
+        f"• Escaneo automático: `10:00 y 17:00 UTC` (05:00 y 12:00 COL)\n"
         f"• Liquidación: `23:30 UTC`\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"Los picks se envían solos. Usa `/picks` para ver el resumen del día."
