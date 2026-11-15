@@ -56,8 +56,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Rango estricto de cuotas: `1.45 a 2.45`\n"
         f"• Gestión de riesgo: `Quarter Kelly (máx 4% por pick)`\n\n"
         f"📌 *Comandos Disponibles:*\n"
-        f"• `/picks` — Pronósticos de la jornada de *hoy*\n"
-        f"• `/proximos` — Pronósticos anticipados de la próxima fecha\n"
+        f"• `/picks` — Resumen del día: qué se envió, qué apostaste, estado de banca\n"
+        f"• `/proximos` — Pronósticos anticipados de la próxima jornada\n"
         f"• `/bankroll` — Consultar saldo actual de tu banca\n"
         f"• `/setbank 500` — Establecer o reiniciar tu banca\n"
         f"• `/stats` — Estadísticas y tasa de acierto del modelo\n"
@@ -69,86 +69,120 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Inspección diaria: partidos de hoy (próximas 24h).
+    Resumen del día: qué picks se enviaron automáticamente hoy, su estado y la banca.
+    Las tarjetas de picks se envían solas via scheduler (08:00 y 14:00 UTC).
     """
     wait_msg = await update.message.reply_text(
-        "🔍 *Inspeccionando partidos de hoy (Fútbol, NBA y Tenis)...*", parse_mode="Markdown"
+        "📋 *Generando resumen del día...*", parse_mode="Markdown"
     )
 
     try:
-        df_hist = get_cached_history()
-        today_picks = predict_upcoming(df_hist, max_hours=24)
+        # Leer todos los picks de la BD
+        all_picks_db = select("picks", limit=5000)
+
+        # Filtrar solo los de hoy (UTC)
+        now_utc = pd.Timestamp.now(tz="UTC")
+        today_str = now_utc.strftime("%Y-%m-%d")
+
+        today_picks_db = []
+        for p in all_picks_db:
+            created = p.get("created_at", "")
+            if created and created[:10] == today_str:
+                today_picks_db.append(p)
 
         await wait_msg.delete()
 
-        if not today_picks:
+        if not today_picks_db:
             await update.message.reply_text(
-                "📭 *Sin pronósticos de alto valor para hoy*\n\n"
-                "El modelo evaluó la jornada de hoy (Fútbol, NBA y Tenis) pero ningún encuentro "
-                "supera los filtros estrictos de valor (cuota 1.45–2.45 · EV positivo · prob ≥ 44%).\n\n"
-                "🛡️ *Disciplina:* No forzamos apuestas cuando no existe ventaja matemática sobre la casa.\n"
-                "👉 Si deseas consultar partidos de los próximos días, escribe `/proximos`.",
+                "📭 *Sin picks enviados hoy*\n\n"
+                "El sistema escanea automáticamente a las *08:00 y 14:00 UTC*.\n"
+                "Cuando haya partidos con valor matemático, recibirás la tarjeta directamente aquí.\n\n"
+                "👉 `/proximos` para ver picks de la próxima jornada.",
                 parse_mode="Markdown"
             )
             return
 
-        already_sent = get_already_sent_keys()
-        new_picks = [
-            p for p in today_picks
-            if (p["partido_id"], p["mercado"], p["outcome"]) not in already_sent
-        ]
+        # Construir resumen
+        lines = []
+        apostados = 0
+        no_apostados = 0
+        pendientes = 0
 
-        if not new_picks:
-            await update.message.reply_text(
-                "✅ *Pronósticos de hoy al día*\n\n"
-                "Ya has recibido todos los pronósticos disponibles para los partidos de hoy. "
-                "Revisa los mensajes anteriores en este chat para marcar tus apuestas.\n\n"
-                f"💼 Consulta tu banca con `/bankroll` o espera a la liquidación nocturna.",
-                parse_mode="Markdown"
+        SPORT_ICONS = {"football": "⚽", "basketball": "🏀", "tennis": "🎾", "americano": "🏈"}
+
+        for p in today_picks_db:
+            pick_id  = p.get("id", "")
+            partido  = p.get("partido_id", "")
+            outcome  = p.get("outcome", "")
+            cuota    = float(p.get("cuota", 0))
+            ev       = float(p.get("ev", 0)) * 100
+            resultado = p.get("resultado_correcto")
+
+            # Estado: apostado / no apostado / pendiente respuesta
+            status = get_pick_placed_status(pick_id)
+            if status is True:
+                apostados += 1
+                estado_icon = "✅"
+                estado_txt  = "Apostada"
+            elif status is False:
+                no_apostados += 1
+                estado_icon = "⏭️"
+                estado_txt  = "Observación"
+            else:
+                pendientes += 1
+                estado_icon = "⏳"
+                estado_txt  = "Pendiente"
+
+            # Resultado si ya liquidó
+            result_txt = ""
+            if resultado is True:
+                result_txt = " · 🟢 Acertada"
+            elif resultado is False:
+                result_txt = " · 🔴 Fallada"
+
+            # Buscar datos del partido en BD para mostrar equipos
+            partido_rows = select("partidos", {"id": partido}, limit=1) if partido else []
+            if partido_rows:
+                local     = partido_rows[0].get("equipo_local", "")
+                visitante = partido_rows[0].get("equipo_visitante", "")
+                deporte   = partido_rows[0].get("deporte", "football")
+                sport_icon = SPORT_ICONS.get(deporte, "🎯")
+                matchup = f"{local} vs {visitante}"
+            else:
+                sport_icon = "🎯"
+                matchup = f"Partido ID …{str(partido)[-6:]}"
+
+            outcome_txt = "Local" if outcome == "H" else ("Empate" if outcome == "D" else "Visitante")
+            lines.append(
+                f"{estado_icon} {sport_icon} *{matchup}*\n"
+                f"   `{outcome_txt}` @ `{cuota:.2f}` · EV `+{ev:.1f}%` · {estado_txt}{result_txt}"
             )
-            return
-
-        picks_to_send = new_picks[:3]
-        await update.message.reply_text(
-            f"🎯 *{len(picks_to_send)} pronóstico(s) con valor para hoy*\n"
-            f"_Referencia: Pinnacle / 1xBet · Criterio EV+_",
-            parse_mode="Markdown"
-        )
 
         current_bank = get_current_bankroll()
-        for p in picks_to_send:
-            msg = format_pick_message(p, bankroll=current_bank)
+        summary_header = (
+            f"📋 *RESUMEN DE HOY — {today_str}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"• Picks enviados: `{len(today_picks_db)}`\n"
+            f"• ✅ Apostadas: `{apostados}` · ⏭️ Observación: `{no_apostados}` · ⏳ Sin respuesta: `{pendientes}`\n"
+            f"• 💼 Banca actual: `${current_bank:,.2f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+        )
 
-            pick_record = {
-                "partido_id":     p["partido_id"],
-                "mercado":        p["mercado"],
-                "outcome":        p["outcome"],
-                "prob_modelo":    p["prob_modelo"],
-                "prob_implicita": p["prob_implicita"],
-                "ev":             p["ev"],
-                "cuota":          p["cuota"],
-                "bookmaker":      p["bookmaker"],
-                "kelly_fraccion": p["kelly"],
-            }
-            res = insert("picks", [pick_record])
-            if not res:
-                continue
+        full_msg = summary_header + "\n".join(lines)
 
-            pick_id = res[0]["id"]
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Aposté a esta", callback_data=f"bet_placed:{pick_id}"),
-                InlineKeyboardButton("⏭️ No aposté",    callback_data=f"bet_skipped:{pick_id}")
-            ]])
-            sent_msg = await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
-            save_pick_meta(pick_id=pick_id, msg_id=sent_msg.message_id)
+        # Si no hay partidos disponibles hoy pero picks están en BD sin partido_id resuelto
+        if not lines:
+            full_msg += "\n_Sin detalle disponible para los picks de hoy._"
+
+        await update.message.reply_text(full_msg, parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"Error en /picks: {e}")
+        logger.error(f"Error en /picks resumen: {e}")
         try:
             await wait_msg.delete()
         except Exception:
             pass
-        await update.message.reply_text(f"⚠️ Error procesando pronósticos: {e}")
+        await update.message.reply_text(f"⚠️ Error generando resumen: {e}")
 
 
 async def proximos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -340,7 +374,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     from telegram import BotCommand
     commands = [
-        BotCommand("picks",    "🎯 Pronósticos de hoy (Fútbol, NBA, Tenis)"),
+        BotCommand("picks",    "📋 Resumen del día (picks enviados + estado)"),
         BotCommand("proximos", "📅 Pronósticos anticipados próxima jornada"),
         BotCommand("bankroll", "💼 Consultar saldo de banca actual"),
         BotCommand("setbank",  "💵 Configurar monto de banca (ej: /setbank 500)"),
