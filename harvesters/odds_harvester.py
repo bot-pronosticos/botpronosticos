@@ -31,12 +31,15 @@ SPORTS_CONFIG = {
     "soccer_uefa_nations_league":  {"name": "UEFA Nations League", "deporte": "football"},
     "soccer_italy_serie_a":        {"name": "Serie A",             "deporte": "football"},
     "soccer_germany_bundesliga":   {"name": "Bundesliga",          "deporte": "football"},
-    # Baloncesto & Americano (alta frecuencia y fines de semana)
+    # Baloncesto (alta frecuencia nocturna)
     "basketball_nba":              {"name": "NBA",                 "deporte": "basketball"},
+    # Tenis ATP (mercado binario de alta eficiencia)
+    "tennis_atp_finals":           {"name": "ATP Finals",          "deporte": "tennis"},
+    # Fútbol Americano (fines de semana)
     "americanfootball_nfl":        {"name": "NFL",                 "deporte": "americano"},
 }
 
-# Monitoreamos h2h para maximizar la cobertura deportiva dentro del free tier
+# Monitoreamos exclusivamente ganador (h2h) para maximizar cobertura y minimizar comisiones
 MARKETS = ["h2h"]
 
 

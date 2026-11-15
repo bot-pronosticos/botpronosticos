@@ -9,6 +9,7 @@ Formato limpio y profesional para pantalla de smartphone:
 SPORT_ICONS = {
     "football":   "⚽",
     "basketball": "🏀",
+    "tennis":     "🎾",
     "americano":  "🏈",
 }
 

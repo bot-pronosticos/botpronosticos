@@ -50,8 +50,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 *Hola {user}*\n\n"
         f"🤖 *Bot de Pronósticos Multideporte · Modelo ML EV+*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Cobertura: *Fútbol (Ligas Top & UEFA) + NBA*\n"
-        f"• Cuotas de referencia: *Pinnacle / 1xBet / DraftKings*\n"
+        f"• Cobertura: *Fútbol, Baloncesto (NBA) & Tenis (ATP)*\n"
+        f"• Mercado transversal: *Ganador / Moneyline (máxima liquidez, menor comisión)*\n"
+        f"• Cuotas de referencia: *Pinnacle / 1xBet / Betfair*\n"
         f"• Rango estricto de cuotas: `1.45 a 2.45`\n"
         f"• Gestión de riesgo: `Quarter Kelly (máx 4% por pick)`\n\n"
         f"📌 *Comandos Disponibles:*\n"
@@ -71,7 +72,7 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Inspección diaria: partidos de hoy (próximas 24h).
     """
     wait_msg = await update.message.reply_text(
-        "🔍 *Inspeccionando partidos de hoy (Fútbol y NBA)...*", parse_mode="Markdown"
+        "🔍 *Inspeccionando partidos de hoy (Fútbol, NBA y Tenis)...*", parse_mode="Markdown"
     )
 
     try:
@@ -83,8 +84,8 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not today_picks:
             await update.message.reply_text(
                 "📭 *Sin pronósticos de alto valor para hoy*\n\n"
-                "El modelo evaluó la jornada de hoy pero ningún encuentro supera los filtros "
-                "estrictos de valor (cuota 1.45–2.45 · EV positivo · prob ≥ 44%).\n\n"
+                "El modelo evaluó la jornada de hoy (Fútbol, NBA y Tenis) pero ningún encuentro "
+                "supera los filtros estrictos de valor (cuota 1.45–2.45 · EV positivo · prob ≥ 44%).\n\n"
                 "🛡️ *Disciplina:* No forzamos apuestas cuando no existe ventaja matemática sobre la casa.\n"
                 "👉 Si deseas consultar partidos de los próximos días, escribe `/proximos`.",
                 parse_mode="Markdown"
@@ -339,7 +340,7 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(application):
     from telegram import BotCommand
     commands = [
-        BotCommand("picks",    "🎯 Pronósticos de hoy (Fútbol & NBA)"),
+        BotCommand("picks",    "🎯 Pronósticos de hoy (Fútbol, NBA, Tenis)"),
         BotCommand("proximos", "📅 Pronósticos anticipados próxima jornada"),
         BotCommand("bankroll", "💼 Consultar saldo de banca actual"),
         BotCommand("setbank",  "💵 Configurar monto de banca (ej: /setbank 500)"),
