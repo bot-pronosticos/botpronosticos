@@ -69,120 +69,162 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Resumen del día: qué picks se enviaron automáticamente hoy, su estado y la banca.
-    Las tarjetas de picks se envían solas via scheduler (08:00 y 14:00 UTC).
+    Inspección de partidos de HOY (próximas 24 horas):
+    - Si encuentra picks de alto valor que no se hayan emitido, envía las tarjetas interactivas.
+    - Muestra el resumen compacto de los pronósticos de hoy y el estado de la banca.
+    - Partidos de otras fechas (como Sevilla vs Betis) NUNCA se muestran aquí.
     """
     wait_msg = await update.message.reply_text(
-        "📋 *Generando resumen del día...*", parse_mode="Markdown"
+        "🔍 *Inspeccionando partidos de hoy (próximas 24h)...*", parse_mode="Markdown"
     )
 
     try:
-        # Leer todos los picks de la BD
-        all_picks_db = select("picks", limit=5000)
+        df_hist = get_cached_history()
+        # 1. Escaneo estricto de las próximas 24h
+        today_picks = predict_upcoming(df_hist, max_hours=24)
 
-        # Filtrar solo los de hoy (UTC)
+        already_sent = get_already_sent_keys()
+        new_picks = [
+            p for p in today_picks
+            if (p["partido_id"], p["mercado"], p["outcome"]) not in already_sent
+        ]
+
+        current_bank = get_current_bankroll()
+
+        # Si hay picks nuevos de hoy que no se hayan enviado, emitir las tarjetas
+        if new_picks:
+            picks_to_send = new_picks[:3]
+            await update.message.reply_text(
+                f"🎯 *{len(picks_to_send)} nuevo(s) pronóstico(s) para hoy*\n"
+                f"_Referencia: Pinnacle / 1xBet · Criterio EV+_",
+                parse_mode="Markdown"
+            )
+            for p in picks_to_send:
+                msg = format_pick_message(p, bankroll=current_bank)
+                pick_record = {
+                    "partido_id":     p["partido_id"],
+                    "mercado":        p["mercado"],
+                    "outcome":        p["outcome"],
+                    "prob_modelo":    p["prob_modelo"],
+                    "prob_implicita": p["prob_implicita"],
+                    "ev":             p["ev"],
+                    "cuota":          p["cuota"],
+                    "bookmaker":      p["bookmaker"],
+                    "kelly_fraccion": p["kelly"],
+                }
+                res = insert("picks", [pick_record])
+                if not res:
+                    continue
+                pick_id = res[0]["id"]
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Aposté a esta", callback_data=f"bet_placed:{pick_id}"),
+                    InlineKeyboardButton("⏭️ No aposté",    callback_data=f"bet_skipped:{pick_id}")
+                ]])
+                sent_msg = await update.message.reply_text(msg, reply_markup=keyboard, parse_mode="Markdown")
+                save_pick_meta(pick_id=pick_id, msg_id=sent_msg.message_id)
+
+        # 2. Consultar picks en BD cuyo kickoff sea efectivamente HOY (ventana 24h)
+        all_picks_db = select("picks", limit=500)
+        partidos_db = {p["id"]: p for p in select("partidos", limit=500)}
         now_utc = pd.Timestamp.now(tz="UTC")
         today_str = now_utc.strftime("%Y-%m-%d")
 
-        today_picks_db = []
+        today_active_picks = []
         for p in all_picks_db:
-            created = p.get("enviado_en") or p.get("creado_en") or p.get("created_at") or ""
-            if created and created[:10] == today_str:
-                today_picks_db.append(p)
+            partido = partidos_db.get(p.get("partido_id"))
+            if not partido:
+                continue
+            ko_str = partido.get("kickoff", "")
+            if not ko_str:
+                continue
+            try:
+                dt_k = pd.Timestamp(ko_str)
+                if dt_k.tzinfo is None:
+                    dt_k = dt_k.tz_localize("UTC")
+                else:
+                    dt_k = dt_k.tz_convert("UTC")
+                # Solo incluir partidos de hoy (kickoff en ventana de 24h o disputados hoy)
+                if dt_k.strftime("%Y-%m-%d") == today_str or (0 <= (dt_k - now_utc).total_seconds() <= 86400):
+                    today_active_picks.append((p, partido))
+            except Exception:
+                continue
 
         await wait_msg.delete()
 
-        if not today_picks_db:
+        # Si no hay ningún pick hoy
+        if not today_active_picks and not new_picks:
             await update.message.reply_text(
-                "📭 *Sin picks enviados hoy*\n\n"
-                "El sistema escanea automáticamente a las *08:00 y 14:00 UTC*.\n"
-                "Cuando haya partidos con valor matemático, recibirás la tarjeta directamente aquí.\n\n"
-                "👉 `/proximos` para ver picks de la próxima jornada.",
+                "📭 *Sin pronósticos de alto valor para hoy*\n\n"
+                "El modelo evaluó la jornada de las próximas 24h (Fútbol, NBA y Tenis) "
+                "pero ningún encuentro supera los filtros estrictos de valor (cuota 1.45–2.45 · EV positivo · prob ≥ 44%).\n\n"
+                "🛡️ *Disciplina:* No forzamos apuestas si no existe ventaja matemática sobre la casa.\n"
+                "👉 Para consultar partidos de los próximos días, escribe `/proximos`.",
                 parse_mode="Markdown"
             )
             return
 
-        # Construir resumen
-        lines = []
-        apostados = 0
-        no_apostados = 0
-        pendientes = 0
+        # Si hay picks activos de hoy, mostrar resumen compacto
+        if today_active_picks:
+            lines = []
+            apostados, no_apostados, pendientes = 0, 0, 0
+            SPORT_ICONS = {"football": "⚽", "basketball": "🏀", "tennis": "🎾", "americano": "🏈"}
 
-        SPORT_ICONS = {"football": "⚽", "basketball": "🏀", "tennis": "🎾", "americano": "🏈"}
+            for p, partido in today_active_picks:
+                pick_id   = p.get("id", "")
+                outcome   = p.get("outcome", "")
+                cuota     = float(p.get("cuota", 0))
+                ev        = float(p.get("ev", 0)) * 100
+                resultado = p.get("resultado_correcto")
 
-        for p in today_picks_db:
-            pick_id  = p.get("id", "")
-            partido  = p.get("partido_id", "")
-            outcome  = p.get("outcome", "")
-            cuota    = float(p.get("cuota", 0))
-            ev       = float(p.get("ev", 0)) * 100
-            resultado = p.get("resultado_correcto")
+                status = get_pick_placed_status(pick_id)
+                if status is True:
+                    apostados += 1
+                    estado_icon = "✅"
+                    estado_txt  = "Apostada"
+                elif status is False:
+                    no_apostados += 1
+                    estado_icon = "⏭️"
+                    estado_txt  = "Observación"
+                else:
+                    pendientes += 1
+                    estado_icon = "⏳"
+                    estado_txt  = "Pendiente"
 
-            # Estado: apostado / no apostado / pendiente respuesta
-            status = get_pick_placed_status(pick_id)
-            if status is True:
-                apostados += 1
-                estado_icon = "✅"
-                estado_txt  = "Apostada"
-            elif status is False:
-                no_apostados += 1
-                estado_icon = "⏭️"
-                estado_txt  = "Observación"
-            else:
-                pendientes += 1
-                estado_icon = "⏳"
-                estado_txt  = "Pendiente"
+                result_txt = ""
+                if resultado is True:
+                    result_txt = " · 🟢 Acertada"
+                elif resultado is False:
+                    result_txt = " · 🔴 Fallada"
 
-            # Resultado si ya liquidó
-            result_txt = ""
-            if resultado is True:
-                result_txt = " · 🟢 Acertada"
-            elif resultado is False:
-                result_txt = " · 🔴 Fallada"
-
-            # Buscar datos del partido en BD para mostrar equipos
-            partido_rows = select("partidos", {"id": partido}, limit=1) if partido else []
-            if partido_rows:
-                local     = partido_rows[0].get("equipo_local", "")
-                visitante = partido_rows[0].get("equipo_visitante", "")
-                deporte   = partido_rows[0].get("deporte", "football")
+                local     = partido.get("equipo_local", "")
+                visitante = partido.get("equipo_visitante", "")
+                deporte   = partido.get("deporte", "football")
                 sport_icon = SPORT_ICONS.get(deporte, "🎯")
-                matchup = f"{local} vs {visitante}"
-            else:
-                sport_icon = "🎯"
-                matchup = f"Partido ID …{str(partido)[-6:]}"
+                matchup   = f"{local} vs {visitante}"
 
-            outcome_txt = "Local" if outcome == "H" else ("Empate" if outcome == "D" else "Visitante")
-            lines.append(
-                f"{estado_icon} {sport_icon} *{matchup}*\n"
-                f"   `{outcome_txt}` @ `{cuota:.2f}` · EV `+{ev:.1f}%` · {estado_txt}{result_txt}"
+                outcome_txt = "Local" if outcome == "H" else ("Empate" if outcome == "D" else "Visitante")
+                lines.append(
+                    f"{estado_icon} {sport_icon} *{matchup}*\n"
+                    f"   `{outcome_txt}` @ `{cuota:.2f}` · EV `+{ev:.1f}%` · {estado_txt}{result_txt}"
+                )
+
+            summary_header = (
+                f"📋 *RESUMEN DE HOY — {today_str}*\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"• Pronósticos de hoy: `{len(today_active_picks)}`\n"
+                f"• ✅ Apostadas: `{apostados}` · ⏭️ Observación: `{no_apostados}` · ⏳ Sin respuesta: `{pendientes}`\n"
+                f"• 💼 Banca actual: `${current_bank:,.2f}`\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
             )
-
-        current_bank = get_current_bankroll()
-        summary_header = (
-            f"📋 *RESUMEN DE HOY — {today_str}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"• Picks enviados: `{len(today_picks_db)}`\n"
-            f"• ✅ Apostadas: `{apostados}` · ⏭️ Observación: `{no_apostados}` · ⏳ Sin respuesta: `{pendientes}`\n"
-            f"• 💼 Banca actual: `${current_bank:,.2f}`\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-        )
-
-        full_msg = summary_header + "\n".join(lines)
-
-        # Si no hay partidos disponibles hoy pero picks están en BD sin partido_id resuelto
-        if not lines:
-            full_msg += "\n_Sin detalle disponible para los picks de hoy._"
-
-        await update.message.reply_text(full_msg, parse_mode="Markdown")
+            await update.message.reply_text(summary_header + "\n".join(lines), parse_mode="Markdown")
 
     except Exception as e:
-        logger.error(f"Error en /picks resumen: {e}")
+        logger.error(f"Error en /picks: {e}")
         try:
             await wait_msg.delete()
         except Exception:
             pass
-        await update.message.reply_text(f"⚠️ Error generando resumen: {e}")
+        await update.message.reply_text(f"⚠️ Error procesando /picks: {e}")
 
 
 async def proximos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
