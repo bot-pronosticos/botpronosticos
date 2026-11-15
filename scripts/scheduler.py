@@ -97,10 +97,7 @@ def main():
     # 2. Cron Scheduler
     scheduler = BackgroundScheduler()
 
-    # Ingesta pura cada 6h (sin enviar picks — solo actualiza BD)
-    scheduler.add_job(job_harvest, CronTrigger(hour="0,6,12,18", minute="15"))
-
-    # Escaneo + envío automático de picks:
+    # Escaneo + envío automático de picks (refresca cuotas justo antes de predecir):
     # 10:00 UTC (05:00 COL) → picks europeos del día
     scheduler.add_job(
         job_auto_scan_and_send,
@@ -114,23 +111,28 @@ def main():
         kwargs={"window_label": "tarde"}
     )
 
-    # Liquidación de resultados
+    # Liquidación de resultados (23:30 UTC / 18:30 COL)
     scheduler.add_job(job_settlement, CronTrigger(hour="23", minute="30"))
 
     scheduler.start()
-    logger.info("Scheduler activo: escaneos automáticos 08:00 y 14:00 UTC · Liquidación 23:30 UTC")
+    logger.info("Scheduler optimizado activo: escaneos 10:00 y 17:00 UTC · Liquidación 23:30 UTC")
 
     # Notificación de arranque
     bank = get_current_bankroll()
     send_telegram_raw(
-        f"🚀 *Sistema de Pronósticos Activo*\n"
+        f"🤖 *Bot de Pronósticos · Versión Actualizada (v2.4.1)*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Estado: `24/7 Operativo (Render)`\n"
+        f"• Estado: `24/7 Cloud (Render)`\n"
+        f"• Cobertura: *Fútbol (Top 5 Ligas) + NBA + Tenis*\n"
         f"• Banca sincronizada: `${bank:,.2f}`\n"
-        f"• Escaneo automático: `10:00 y 17:00 UTC` (05:00 y 12:00 COL)\n"
-        f"• Liquidación: `23:30 UTC`\n"
+        f"• Escaneos automáticos: `10:00 y 17:00 UTC` (05:00 y 12:00 COL)\n"
+        f"• Liquidación automática: `23:30 UTC` (18:30 COL)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Los picks se envían solos. Usa `/picks` para ver el resumen del día."
+        f"✨ *Novedades de esta versión:*\n"
+        f"• `/picks`: Resumen del día corregido y activo.\n"
+        f"• Botones de apuesta ahora permiten cambiar de opinión (`🔄`).\n"
+        f"• Cuota de API optimizada para rendir todo el mes.\n"
+        f"• Sincronización de marcadores en vivo 100% automatizada."
     )
 
     # 3. Bot interactivo (hilo principal)

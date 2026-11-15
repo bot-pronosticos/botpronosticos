@@ -27,27 +27,39 @@ from bot.telegram_notifier import (
 def update_scores_from_odds_api() -> int:
     """
     Sincroniza marcadores reales de partidos finalizados desde The Odds API (/scores).
+    Optimizado: solo consulta los deportes que tienen PICKS ACTIVOS esperando resolución.
     """
-    pending = select("partidos", {"estado": "pendiente"}, limit=500)
-    if not pending:
-        logger.info("No hay partidos pendientes en BD.")
+    unsettled = get_unsettled_picks()
+    if not unsettled:
+        logger.info("No hay picks pendientes por liquidar. 0 requests consumidas de Odds API.")
         return 0
 
-    pending_by_source = {p["source_id"]: p for p in pending if p.get("source_id")}
-    logger.info(f"Partidos pendientes en BD con source_id: {len(pending_by_source)}")
+    # Obtener partidos específicos de los picks no resueltos
+    pids = [p["partido_id"] for p in unsettled if p.get("partido_id")]
+    partidos_pendientes = []
+    for pid in pids:
+        r = select("partidos", {"id": pid}, limit=1)
+        if r and r[0].get("source_id"):
+            partidos_pendientes.append(r[0])
 
-    pending_sports = {p.get("liga") for p in pending}
-    pending_deportes = {p.get("deporte") for p in pending}
+    if not partidos_pendientes:
+        logger.info("Los picks pendientes no tienen partidos asociados con source_id.")
+        return 0
 
+    pending_by_source = {p["source_id"]: p for p in partidos_pendientes}
+    pending_sports = {p.get("liga") for p in partidos_pendientes}
+    pending_deportes = {p.get("deporte") for p in partidos_pendientes}
+
+    # Solo consultamos los deportes con picks reales esperando resolución
     sports_to_query = []
     for skey, meta in SPORTS_CONFIG.items():
         if meta["name"] in pending_sports or meta["deporte"] in pending_deportes:
             sports_to_query.append(skey)
 
     if not sports_to_query:
-        sports_to_query = list(SPORTS_CONFIG.keys())[:3]
+        return 0
 
-    logger.info(f"Sincronizando scores para {len(sports_to_query)} deportes...")
+    logger.info(f"Sincronizando scores para deportes con picks activos: {sports_to_query}...")
     updated_count = 0
 
     for skey in sports_to_query:

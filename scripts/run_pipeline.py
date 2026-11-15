@@ -53,7 +53,6 @@ def run_pipeline():
     t0 = time.time()
 
     events    = step_odds()
-    step_football_stats()
     nba_games = step_nba()
 
     logger.info("=" * 50)

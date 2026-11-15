@@ -86,7 +86,7 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         today_picks_db = []
         for p in all_picks_db:
-            created = p.get("created_at", "")
+            created = p.get("enviado_en") or p.get("creado_en") or p.get("created_at") or ""
             if created and created[:10] == today_str:
                 today_picks_db.append(p)
 
@@ -209,10 +209,21 @@ async def proximos_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Excluir picks de hoy (esos los maneja el auto-scanner, no /proximos)
         now_utc = pd.Timestamp.now(tz="UTC")
-        future_only = [
-            p for p in future_picks
-            if pd.Timestamp(p["kickoff"]).tz_convert("UTC") > now_utc + pd.Timedelta(hours=24)
-        ]
+        future_only = []
+        for p in future_picks:
+            ko_str = p.get("kickoff", "")
+            if not ko_str:
+                continue
+            try:
+                dt_k = pd.Timestamp(ko_str)
+                if dt_k.tzinfo is None:
+                    dt_k = dt_k.tz_localize("UTC")
+                else:
+                    dt_k = dt_k.tz_convert("UTC")
+                if dt_k > now_utc + pd.Timedelta(hours=24):
+                    future_only.append(p)
+            except Exception:
+                continue
 
         if not future_only:
             await update.message.reply_text(
@@ -255,18 +266,18 @@ async def handle_bet_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "bet_placed":
         set_pick_placed_status(pick_id, True)
-        await query.answer("✅ Apuesta registrada en tu banca")
+        await query.answer("✅ Registrada como APOSTADA")
         new_keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Registrada en tu banca", callback_data="none")
+            InlineKeyboardButton("✅ Apostada · 🔄 Cambiar a No aposté", callback_data=f"bet_skipped:{pick_id}")
         ]])
         await query.edit_message_reply_markup(reply_markup=new_keyboard)
         logger.info(f"Pick {pick_id[:8]}: MARCADO COMO APOSTADO")
 
     elif action == "bet_skipped":
         set_pick_placed_status(pick_id, False)
-        await query.answer("⏭️ En observación. Tu banca no variará.")
+        await query.answer("⏭️ Registrada EN OBSERVACIÓN (sin apostar)")
         new_keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("⏭️ En observación (sin apostar)", callback_data="none")
+            InlineKeyboardButton("⏭️ En observación · 🔄 Cambiar a Aposté", callback_data=f"bet_placed:{pick_id}")
         ]])
         await query.edit_message_reply_markup(reply_markup=new_keyboard)
         logger.info(f"Pick {pick_id[:8]}: MARCADO COMO NO APOSTADO")
