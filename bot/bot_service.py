@@ -170,8 +170,22 @@ async def setbank_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Por favor ingresa un número válido. Ejemplo: `/setbank 300`", parse_mode="Markdown")
 
 
+async def post_init(application):
+    """Registra el menú de comandos nativo en Telegram."""
+    from telegram import BotCommand
+    commands = [
+        BotCommand("picks", "🎯 Ver mejores pronósticos del día"),
+        BotCommand("bankroll", "💼 Consultar saldo de banca actual"),
+        BotCommand("setbank", "💵 Configurar nuevo monto de banca"),
+        BotCommand("stats", "📈 Estadísticas y tasa de acierto"),
+        BotCommand("help", "ℹ️ Ayuda e información del sistema"),
+    ]
+    await application.bot.set_my_commands(commands)
+    logger.info("Menú de comandos de Telegram registrado OK.")
+
+
 def build_app():
-    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("picks", picks_command))
     app.add_handler(CommandHandler("bankroll", bankroll_command))
