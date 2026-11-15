@@ -1,0 +1,21 @@
+# Configuración y secretos
+config/.env
+.env
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Datos temporales y logs
+logs/
+data/raw/
+data/*.json
+
+# Modelos binarios (se generan al arrancar o se versionan si pesan poco)
+# models/*.pkl
