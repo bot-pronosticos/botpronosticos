@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from datetime import datetime, timezone
 import unicodedata
 import re
+import math
 from difflib import SequenceMatcher
 import pandas as pd
 import numpy as np
@@ -122,6 +123,54 @@ def normalize_team(name: str, db_teams: list[str]) -> str | None:
     if best_score >= 0.82:
         return best_t
     return None
+
+
+LEAGUE_GOAL_MEANS = {
+    "Premier League": {"home": 1.55, "away": 1.30},
+    "LaLiga":         {"home": 1.45, "away": 1.15},
+    "Serie A":        {"home": 1.48, "away": 1.20},
+    "Bundesliga":     {"home": 1.70, "away": 1.40},
+    "Ligue 1":        {"home": 1.50, "away": 1.25},
+}
+
+
+def calc_ou25_poisson(home_team: str, away_team: str, liga: str, df: pd.DataFrame) -> tuple[float, float, float, float] | None:
+    """
+    Calcula probabilidades cuantitativas de Más/Menos de 2.5 goles usando distribución de Poisson bivariada.
+    Retorna: (prob_over, prob_under, exp_goals_home, exp_goals_away)
+    """
+    if df is None or df.empty:
+        return None
+    sub_h = df[df["HomeTeam"] == home_team]
+    sub_a = df[df["AwayTeam"] == away_team]
+    if len(sub_h) < 5 or len(sub_a) < 5:
+        return None
+
+    means = LEAGUE_GOAL_MEANS.get(liga, {"home": 1.50, "away": 1.25})
+
+    # Medias de goles en casa y visita (últimos 15 encuentros)
+    h_gf = sub_h["FTHG"].tail(15).mean()
+    h_ga = sub_h["FTAG"].tail(15).mean()
+    a_gf = sub_a["FTAG"].tail(15).mean()
+    a_ga = sub_a["FTHG"].tail(15).mean()
+
+    # Parámetros de tasa lambda y mu de Poisson
+    lambda_h = (h_gf * a_ga) / means["home"]
+    mu_a = (a_gf * h_ga) / means["away"]
+
+    lambda_h = max(0.40, min(3.80, lambda_h))
+    mu_a = max(0.30, min(3.20, mu_a))
+
+    p_under = 0.0
+    for h_g in range(3):
+        for a_g in range(3 - h_g):
+            term_h = (lambda_h ** h_g) * math.exp(-lambda_h) / math.factorial(h_g)
+            term_a = (mu_a ** a_g) * math.exp(-mu_a) / math.factorial(a_g)
+            p_under += term_h * term_a
+
+    p_over = max(0.05, min(0.95, 1.0 - p_under))
+    p_under = 1.0 - p_over
+    return p_over, p_under, lambda_h, mu_a
 
 
 def format_kickoff_label(ko_str: str) -> str:
@@ -243,6 +292,7 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
                 continue
 
             candidates.append({
+                "mercado":     "h2h",
                 "outcome_key": "H",
                 "label":       f"Gana {local}",
                 "prob":        ph_mod,
@@ -251,6 +301,7 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
                 "context_arg": f"Ventaja predictiva estadística sobre la cuota {oh:.2f} fijada por el mercado.",
             })
             candidates.append({
+                "mercado":     "h2h",
                 "outcome_key": "A",
                 "label":       f"Gana {visitante}",
                 "prob":        pa_mod,
@@ -258,6 +309,32 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
                 "stats_arg":   f"{visitante} registra métricas competitivas superiores con {pa_mod*100:.1f}% proyectado frente a {100.0/oa:.1f}% implícito.",
                 "context_arg": f"Valor cuantitativo positivo frente al precio de cierre {oa:.2f}.",
             })
+
+            # Mercado Over / Under 2.5 Goles (Modelo Poisson Bivariado)
+            o25 = float(event.get("odds_over_25", 0.0))
+            u25 = float(event.get("odds_under_25", 0.0))
+            if o25 > 1.0 and u25 > 1.0 and df_history is not None:
+                ou_res = calc_ou25_poisson(norm_local, norm_visitante, liga, df_history)
+                if ou_res:
+                    p_over, p_under, exp_h, exp_a = ou_res
+                    candidates.append({
+                        "mercado":     "ou25",
+                        "outcome_key": "OVER",
+                        "label":       "Más de 2.5 Goles",
+                        "prob":        p_over,
+                        "cuota":       o25,
+                        "stats_arg":   f"Modelo Poisson proyecta {exp_h+exp_a:.2f} goles esperados ({exp_h:.2f} {local} + {exp_a:.2f} {visitante}) con {p_over*100:.1f}% de probabilidad de 3+ goles.",
+                        "context_arg": f"Oportunidad estadística sobre la cuota {o25:.2f} frente a probabilidad de equilibrio de {1.0/p_over:.2f}.",
+                    })
+                    candidates.append({
+                        "mercado":     "ou25",
+                        "outcome_key": "UNDER",
+                        "label":       "Menos de 2.5 Goles",
+                        "prob":        p_under,
+                        "cuota":       u25,
+                        "stats_arg":   f"Modelo Poisson proyecta {exp_h+exp_a:.2f} goles esperados con {p_under*100:.1f}% de probabilidad de 0, 1 o 2 goles.",
+                        "context_arg": f"Solidez defensiva proyecta valor en Under 2.5 sobre el precio {u25:.2f}.",
+                    })
 
         # ── 2. BALONCESTO (NBA) ──────────────────────────────────────────────
         elif sport == "basketball":
@@ -364,7 +441,7 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
                     "kickoff":           kickoff,
                     "kickoff_label":     format_kickoff_label(kickoff),
                     "hours_to_kickoff":  hrs,
-                    "mercado":           "h2h",
+                    "mercado":           c.get("mercado", "h2h"),
                     "outcome":           c["outcome_key"],
                     "outcome_label":     c["label"],
                     "prob_modelo":       round(prob, 4),

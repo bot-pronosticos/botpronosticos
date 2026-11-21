@@ -130,6 +130,38 @@ def fetch_live_feed() -> list[dict]:
                             if odds_h > 1.0 and odds_a > 1.0:
                                 break
 
+                        # Cuotas de Totales Over/Under 2.5 (mercado de goles)
+                        odds_o25, odds_u25 = 0.0, 0.0
+                        if s["deporte"] == "football":
+                            for dg in ev.get("displayGroups", []):
+                                dg_desc = dg.get("description", "").lower()
+                                if dg_desc not in ["game lines", "alternate lines", "lineas alternativas", ""]:
+                                    continue
+                                for m in dg.get("markets", []):
+                                    if m.get("key") in ["2W-OU", "2W-Total-Goals"]:
+                                        period = (m.get("period", {}).get("description") or "").strip().lower()
+                                        mdesc = (m.get("description") or "").strip().lower()
+                                        if period and period not in VALID_PERIODS:
+                                            continue
+                                        if any(w in mdesc for w in ["1h", "half", "corner", "card", "team"]):
+                                            continue
+                                        cur_o, cur_u = 0.0, 0.0
+                                        for o in m.get("outcomes", []):
+                                            hcap = str(o.get("price", {}).get("handicap", ""))
+                                            p_dec = float(o.get("price", {}).get("decimal") or 0.0)
+                                            otype = o.get("type", "").upper()
+                                            odesc = (o.get("description") or "").strip().lower()
+                                            if hcap == "2.5":
+                                                if otype == "O" or "over" in odesc or "más de" in odesc:
+                                                    cur_o = p_dec
+                                                elif otype == "U" or "under" in odesc or "menos de" in odesc:
+                                                    cur_u = p_dec
+                                        if cur_o > 1.0 and cur_u > 1.0:
+                                            odds_o25, odds_u25 = cur_o, cur_u
+                                            break
+                                if odds_o25 > 1.0 and odds_u25 > 1.0:
+                                    break
+
                         if odds_h > 1.0 and odds_a > 1.0:
                             hrs = round((dt - now).total_seconds() / 3600, 1)
                             all_events.append({
@@ -144,6 +176,8 @@ def fetch_live_feed() -> list[dict]:
                                 "odds_h":           round(odds_h, 3),
                                 "odds_d":           round(odds_d, 3),
                                 "odds_a":           round(odds_a, 3),
+                                "odds_over_25":     round(odds_o25, 3),
+                                "odds_under_25":    round(odds_u25, 3),
                                 "bookmaker":        "Bovada / Market Consensus",
                             })
             except Exception as e:

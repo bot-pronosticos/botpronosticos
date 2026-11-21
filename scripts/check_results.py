@@ -267,7 +267,17 @@ def check_and_settle():
         stake = min(current_bank * kelly_f, current_bank * 0.04)
         stake = max(stake, 1.0)
 
-        is_win = (predicted == actual_res)
+        mercado = pick.get("mercado", "h2h")
+        if mercado == "ou25":
+            tot_goals = gl + gv
+            if predicted == "OVER":
+                is_win = (tot_goals > 2.5)
+            elif predicted == "UNDER":
+                is_win = (tot_goals < 2.5)
+            else:
+                is_win = False
+        else:
+            is_win = (predicted == actual_res)
 
         if is_win:
             ganancia = stake * (cuota - 1.0)
