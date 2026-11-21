@@ -11,10 +11,10 @@ ENV_PATH = Path(__file__).parent / ".env"
 load_dotenv(ENV_PATH)
 
 
-def _require(key: str) -> str:
+def _get_val(key: str, default: str = "") -> str:
     val = os.getenv(key)
     if not val:
-        raise EnvironmentError(f"Variable de entorno requerida no encontrada: {key}")
+        return default
     return val
 
 
@@ -23,16 +23,16 @@ def _optional(key: str, default=None):
 
 
 # ── Telegram ──────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = _require("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = _require("TELEGRAM_CHAT_ID")
+TELEGRAM_BOT_TOKEN = _get_val("TELEGRAM_BOT_TOKEN", "9128575947:AAHg5bFa_keV9uc-0rgZ0gyZsxg8U28PBzM")
+TELEGRAM_CHAT_ID   = _get_val("TELEGRAM_CHAT_ID", "5241095844")
 
 # ── Supabase ──────────────────────────────────────────────
-SUPABASE_URL = _require("SUPABASE_URL")
-SUPABASE_KEY = _require("SUPABASE_KEY")
+SUPABASE_URL = _get_val("SUPABASE_URL", "https://rvzmdpvjgactqokepxsv.supabase.co")
+SUPABASE_KEY = _get_val("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ2em1kcHZqZ2FjdHFva2VweHN2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ3NjI0NzEsImV4cCI6MjExMDMzODQ3MX0.3jlVqitiKlu2lt3N1vwNOsLiOovc9zVToNqvAe_DGQY")
 
 # ── APIs externas ─────────────────────────────────────────
-ODDS_API_KEY   = _require("ODDS_API_KEY")
-RAPIDAPI_KEY   = _require("RAPIDAPI_KEY")
+ODDS_API_KEY   = _get_val("ODDS_API_KEY", "1cc8138c10617d6ee7375552a40b6535")
+RAPIDAPI_KEY   = _get_val("RAPIDAPI_KEY", "7aaa7822195e7c940c7359f7cbd08077")
 
 # ── Parámetros del modelo ─────────────────────────────────
 EV_THRESHOLD   = float(_optional("EV_THRESHOLD", "0.05"))
