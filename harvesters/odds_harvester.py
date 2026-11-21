@@ -97,22 +97,38 @@ def fetch_live_feed() -> list[dict]:
                             teams = desc.split(" @ ", 1)
                             a_team, h_team = teams[0].strip(), teams[1].strip()
 
-                        # Cuotas de Ganador (Moneyline / 1X2)
+                        # Cuotas de Ganador (Moneyline / 1X2 limpia, sin corners, tarjetas ni periodos parciales)
+                        VALID_PERIODS = {"regulation time", "game", "match", "full event", "live match", "normal time", ""}
+                        EXCLUDE_WORDS = {"corner", "card", "half", "1h", "2h", "quarter", "1q", "2q", "3q", "4q", "set", "booking"}
+
                         odds_h, odds_d, odds_a = 0.0, 0.0, 0.0
                         for dg in ev.get("displayGroups", []):
+                            dg_desc = dg.get("description", "").lower()
+                            if dg_desc not in ["game lines", "lineas del juego", ""]:
+                                continue
                             for m in dg.get("markets", []):
-                                mkey = m.get("key", "")
-                                if mkey in ["3W-1X2", "2W-12", "2W-Moneyline", "3W-Match-Result"]:
-                                    for o in m.get("outcomes", []):
-                                        p_dec = float(o.get("price", {}).get("decimal") or 0.0)
-                                        otype = o.get("type", "").upper()
-                                        odesc = o.get("description", "")
-                                        if otype == "H" or odesc == h_team or h_team in odesc:
-                                            odds_h = max(odds_h, p_dec)
-                                        elif otype == "A" or odesc == a_team or a_team in odesc:
-                                            odds_a = max(odds_a, p_dec)
-                                        elif otype == "D" or "draw" in odesc.lower() or "tie" in odesc.lower():
-                                            odds_d = max(odds_d, p_dec)
+                                if m.get("key") not in ["3W-1X2", "2W-12", "2W-Moneyline", "3W-Match-Result"]:
+                                    continue
+                                period = (m.get("period", {}).get("description") or "").strip().lower()
+                                mdesc = (m.get("description") or "").strip().lower()
+                                if period and period not in VALID_PERIODS:
+                                    continue
+                                if any(w in mdesc for w in EXCLUDE_WORDS):
+                                    continue
+                                for o in m.get("outcomes", []):
+                                    p_dec = float(o.get("price", {}).get("decimal") or 0.0)
+                                    otype = o.get("type", "").upper()
+                                    odesc = (o.get("description") or "").strip().lower()
+                                    if otype == "H" or odesc == h_team.lower():
+                                        odds_h = p_dec
+                                    elif otype == "A" or odesc == a_team.lower():
+                                        odds_a = p_dec
+                                    elif otype == "D" or "draw" in odesc or "tie" in odesc or "empate" in odesc:
+                                        odds_d = p_dec
+                                if odds_h > 1.0 and odds_a > 1.0:
+                                    break
+                            if odds_h > 1.0 and odds_a > 1.0:
+                                break
 
                         if odds_h > 1.0 and odds_a > 1.0:
                             hrs = round((dt - now).total_seconds() / 3600, 1)

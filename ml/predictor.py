@@ -14,6 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from datetime import datetime, timezone
+import unicodedata
+import re
+from difflib import SequenceMatcher
 import pandas as pd
 import numpy as np
 from loguru import logger
@@ -25,8 +28,100 @@ from ml.backtester import compute_ev, kelly_fraction, implied_prob
 
 MIN_ODDS         = 1.45
 MAX_ODDS         = 2.50
-MIN_PROB_ACIERTO = 0.42
+MIN_PROB_ACIERTO = 0.40
 MIN_EV           = 0.025
+
+# Mapeo exhaustivo de alias para ligas Top 5 europeas (Bovada -> Base de Datos Histórica)
+TEAM_ALIASES = {
+    "fc barcelona": "Barcelona",
+    "barca": "Barcelona",
+    "atletico de madrid": "Atletico Madrid",
+    "atletico madrid": "Atletico Madrid",
+    "athletic club": "Athletic Bilbao",
+    "athletic bilbao": "Athletic Bilbao",
+    "tottenham hotspur": "Tottenham",
+    "spurs": "Tottenham",
+    "eintracht frankfurt": "Ein Frankfurt",
+    "frankfurt": "Ein Frankfurt",
+    "paris saint-germain": "Paris Saint Germain",
+    "psg": "Paris Saint Germain",
+    "luton town": "Luton",
+    "wolves": "Wolverhampton Wanderers",
+    "wolverhampton": "Wolverhampton Wanderers",
+    "brighton & hove albion": "Brighton and Hove Albion",
+    "brighton and hove albion": "Brighton and Hove Albion",
+    "brighton": "Brighton and Hove Albion",
+    "west ham": "West Ham United",
+    "newcastle": "Newcastle United",
+    "internazionale": "Inter Milan",
+    "inter": "Inter Milan",
+    "roma": "AS Roma",
+    "milan": "AC Milan",
+    "bayern munchen": "Bayern Munich",
+    "fc bayern munich": "Bayern Munich",
+    "1. fc koln": "FC Koln",
+    "cologne": "FC Koln",
+    "koln": "FC Koln",
+    "borussia monchengladbach": "Borussia Monchengladbach",
+    "borussia mönchengladbach": "Borussia Monchengladbach",
+    "1. fc union berlin": "Union Berlin",
+    "union berlin": "Union Berlin",
+    "alaves": "Deportivo Alavés",
+    "deportivo alaves": "Deportivo Alavés",
+    "celta de vigo": "Celta Vigo",
+    "rc celta": "Celta Vigo",
+    "cadiz cf": "Cadiz",
+    "ud almeria": "Almeria",
+    "villarreal cf": "Villarreal",
+    "sevilla fc": "Sevilla",
+    "real betis balompie": "Real Betis",
+    "osasuna ca": "Osasuna",
+    "valencia cf": "Valencia",
+    "getafe cf": "Getafe",
+    "girona fc": "Girona",
+}
+
+
+def strip_accents(text: str) -> str:
+    """Remueve tildes y diacríticos para comparación normalizada."""
+    return "".join(c for c in unicodedata.normalize("NFD", text) if unicodedata.category(c) != "Mn")
+
+
+def is_non_first_team(name: str) -> bool:
+    """Detecta filiales, divisiones juveniles o equipos femeninos fuera de la DB de 1ª masculina."""
+    low = name.lower()
+    patterns = [r"\(w\)", r"\bwomen\b", r"\bfem\b", r"\bu1[89]\b", r"\bu2[013]\b", r"\breserves\b", r"\bii\b", r"\bb\b$"]
+    return any(re.search(p, low) for p in patterns)
+
+
+def normalize_team(name: str, db_teams: list[str]) -> str | None:
+    """Normaliza el nombre de un equipo para empatarlo con el registro de la DB."""
+    if is_non_first_team(name):
+        return None
+    raw_low = name.strip().lower()
+    clean_low = strip_accents(raw_low)
+
+    if raw_low in TEAM_ALIASES:
+        return TEAM_ALIASES[raw_low]
+    if clean_low in TEAM_ALIASES:
+        return TEAM_ALIASES[clean_low]
+
+    for t in db_teams:
+        if clean_low == strip_accents(t.lower()):
+            return t
+
+    best_t = None
+    best_score = 0.0
+    for t in db_teams:
+        t_clean = strip_accents(t.lower())
+        score = SequenceMatcher(None, clean_low, t_clean).ratio()
+        if score > best_score:
+            best_score = score
+            best_t = t
+
+    if best_score >= 0.82:
+        return best_t
+    return None
 
 
 def format_kickoff_label(ko_str: str) -> str:
@@ -73,6 +168,7 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
     model_data = load_latest()
     models = model_data.get("models", {}) if model_data else {}
     feat_cols = model_data.get("feat_cols", []) if model_data else []
+    db_teams = sorted(list(set(df_history.HomeTeam.unique()) | set(df_history.AwayTeam.unique()))) if df_history is not None else []
 
     all_picks = []
 
@@ -101,6 +197,15 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
 
         # ── 1. FÚTBOL (1X2) ──────────────────────────────────────────────────
         if sport == "football":
+            # Normalizar nombres para empatar con el modelo histórico
+            norm_local = normalize_team(local, db_teams) if db_teams else None
+            norm_visitante = normalize_team(visitante, db_teams) if db_teams else None
+
+            # Si no son equipos de primera división europea modelados, descartar
+            # (evita apuestas a ciegas en ligas amateur de 5ª-7ª división)
+            if not (norm_local and norm_visitante):
+                continue
+
             # Desvigging 3-way
             rh = 1.0 / oh
             ra = 1.0 / oa
@@ -113,16 +218,16 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
             pd_fair = rd / tot
             pa_fair = ra / tot
 
-            # Evaluación con Modelo Ensemble si hay historial
+            # Evaluación con Modelo Ensemble
             used_ml = False
             ph_mod, pa_mod, pd_mod = ph_fair, pa_fair, pd_fair
 
             if df_history is not None and models and feat_cols:
-                h_games = len(df_history[(df_history["HomeTeam"] == local) | (df_history["AwayTeam"] == local)])
-                a_games = len(df_history[(df_history["HomeTeam"] == visitante) | (df_history["AwayTeam"] == visitante)])
+                h_games = len(df_history[(df_history["HomeTeam"] == norm_local) | (df_history["AwayTeam"] == norm_local)])
+                a_games = len(df_history[(df_history["HomeTeam"] == norm_visitante) | (df_history["AwayTeam"] == norm_visitante)])
                 if h_games >= 5 and a_games >= 5:
                     try:
-                        dummy = pd.Series({"HomeTeam": local, "AwayTeam": visitante, "Date": now_utc, "FTR": "H"})
+                        dummy = pd.Series({"HomeTeam": norm_local, "AwayTeam": norm_visitante, "Date": now_utc, "FTR": "H"})
                         feat = build_match_features(dummy, df_history)
                         X = np.array([[feat.get(c, 0.0) for c in feat_cols]])
                         proba = np.mean([m.predict_proba(X)[0] for m in models.values()], axis=0)
@@ -131,30 +236,27 @@ def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> li
                         pd_mod = float(proba[1])
                         ph_mod = float(proba[2])
                         used_ml = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.warning(f"Error prediciendo {norm_local} vs {norm_visitante}: {e}")
 
             if not used_ml:
-                # Ajuste de consenso con ventaja de localía del 2%
-                ph_mod = min(0.85, ph_fair * 1.025)
-                pa_mod = max(0.10, pa_fair * 0.975)
-                pd_mod = max(0.05, 1.0 - ph_mod - pa_mod)
+                continue
 
             candidates.append({
                 "outcome_key": "H",
                 "label":       f"Gana {local}",
                 "prob":        ph_mod,
                 "cuota":       oh,
-                "stats_arg":   f"{local} promedia mayor solidez en casa y el modelo proyecta {ph_mod*100:.0f}% de probabilidad de victoria.",
-                "context_arg": f"Línea de valor sobre el precio de equilibrio de {1.0/ph_mod:.2f} con ventaja de localía.",
+                "stats_arg":   f"El ensamble cuantitativo proyecta {ph_mod*100:.1f}% de probabilidad de victoria para {local} frente a {100.0/oh:.1f}% implícito.",
+                "context_arg": f"Ventaja predictiva estadística sobre la cuota {oh:.2f} fijada por el mercado.",
             })
             candidates.append({
                 "outcome_key": "A",
                 "label":       f"Gana {visitante}",
                 "prob":        pa_mod,
                 "cuota":       oa,
-                "stats_arg":   f"{visitante} registra rendimiento competitivo favorable ({pa_mod*100:.0f}% de probabilidad proyectada).",
-                "context_arg": f"Valor positivo en la cuota visitante frente al consenso general del mercado.",
+                "stats_arg":   f"{visitante} registra métricas competitivas superiores con {pa_mod*100:.1f}% proyectado frente a {100.0/oa:.1f}% implícito.",
+                "context_arg": f"Valor cuantitativo positivo frente al precio de cierre {oa:.2f}.",
             })
 
         # ── 2. BALONCESTO (NBA) ──────────────────────────────────────────────
