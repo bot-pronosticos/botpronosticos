@@ -1,11 +1,13 @@
 """
 scripts/scheduler.py
 Orquestador Autónomo 24/7 para Render.com:
-- Ingesta de cuotas cada 6h.
-- Escaneo de picks AUTOMÁTICO: 08:00 UTC (partidos de tarde) y 14:00 UTC (partidos de noche).
-- Liquidación de resultados a las 23:30 UTC.
-- Healthcheck HTTP para UptimeRobot.
-- /picks en el bot es solo resumen diario — las tarjetas se envían solas.
+- Ingesta de cuotas y escaneos de picks AUTOMÁTICOS con criterio EV+:
+    * 10:00 UTC (05:00 COL) -> Partidos de tarde (Fútbol Europeo, Tenis).
+    * 16:00 UTC (11:00 COL) -> Partidos de noche europea.
+    * 22:00 UTC (17:00 COL) -> Partidos nocturnos (NBA / NFL).
+- Liquidación automática continua cada 2 horas via ESPN Scoreboard (sin límite de API).
+- Healthcheck HTTP para UptimeRobot en $PORT.
+- Interfaz interactiva de Telegram (/picks, /proximos, /bankroll, /stats, botones interactivos).
 """
 import sys
 from pathlib import Path
@@ -18,7 +20,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from loguru import logger
 
-from scripts.run_pipeline import run_pipeline
+from harvesters.odds_harvester import harvest_odds, save_odds_to_db
 from bot.telegram_notifier import broadcast_picks, send_telegram_raw, get_current_bankroll
 from ml.data_loader import load_all_history
 from ml.predictor import predict_upcoming
@@ -31,7 +33,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"status": "online", "service": "bot-pronosticos-ml"}')
+        self.wfile.write(b'{"status": "online", "service": "bot-pronosticos-ml", "version": "3.0.0"}')
 
     def log_message(self, format, *args):
         pass
@@ -44,40 +46,42 @@ def start_health_server(port: int = 8080):
 
 
 def job_harvest():
-    """Ingesta cuotas y fixtures desde The Odds API."""
-    logger.info("⏰ [Cron] Ingesta programada de cuotas y partidos...")
+    """Ingesta cuotas y fixtures desde feeds públicos ilimitados."""
+    logger.info("⏰ [Cron] Ingesta programada de cuotas...")
     try:
-        run_pipeline()
+        events = harvest_odds(force_refresh=True)
+        saved = save_odds_to_db(events)
+        logger.info(f"[Cron Harvest] {len(events)} eventos obtenidos, {saved} sincronizados.")
     except Exception as e:
         logger.error(f"Error en job_harvest: {e}")
 
 
 def job_auto_scan_and_send(window_label: str = ""):
     """
-    Escaneo automático: busca picks con valor para las próximas 24h y los envía
-    directamente al chat como tarjetas con botones.
-    Se ejecuta a las 08:00 UTC (partidos de tarde) y 14:00 UTC (partidos de noche).
+    Escaneo automático: busca picks con valor para las próximas 24h y los emite
+    directamente al chat como tarjetas interactivas con botones.
     """
     logger.info(f"⏰ [Cron] Escaneo automático de picks ({window_label})...")
     try:
-        # Primero refrescar datos para tener cuotas actualizadas
-        run_pipeline()
+        # Refrescar cuotas en vivo
+        events = harvest_odds(force_refresh=True)
+        save_odds_to_db(events)
 
         df_hist = load_all_history()
         picks = predict_upcoming(df_hist, max_hours=24)
 
         if picks:
-            sent = broadcast_picks(picks, max_to_send=5)
-            logger.info(f"[Auto-scan {window_label}] Picks enviados: {sent}")
+            sent = broadcast_picks(picks, max_to_send=4)
+            logger.info(f"[Auto-scan {window_label}] Picks nuevos enviados a Telegram: {sent}")
         else:
-            logger.info(f"[Auto-scan {window_label}] Sin picks de valor en las próximas 24h.")
+            logger.info(f"[Auto-scan {window_label}] Sin picks nuevos de valor en las próximas 24h.")
     except Exception as e:
         logger.error(f"Error en job_auto_scan_and_send ({window_label}): {e}")
 
 
 def job_settlement():
-    """Liquida resultados de partidos finalizados."""
-    logger.info("⏰ [Cron] Liquidando resultados...")
+    """Liquida resultados de partidos finalizados y actualiza bankroll."""
+    logger.info("⏰ [Cron] Verificación y liquidación de resultados...")
     try:
         check_and_settle()
     except Exception as e:
@@ -86,57 +90,69 @@ def job_settlement():
 
 def main():
     logger.info("=" * 60)
-    logger.info("   INICIANDO BOT DE PRONÓSTICOS — MODO CLOUD 24/7")
+    logger.info("   INICIANDO BOT DE PRONÓSTICOS — ARQUITECTURA v3.0 (EV+)")
     logger.info("=" * 60)
 
-    # 1. Healthcheck HTTP
+    # 1. Healthcheck HTTP para UptimeRobot
     port = int(os.getenv("PORT", "8080"))
     th_http = threading.Thread(target=start_health_server, args=(port,), daemon=True)
     th_http.start()
 
-    # 2. Cron Scheduler
+    # 2. Liquidación inicial de pendientes al arrancar
+    try:
+        job_settlement()
+    except Exception as e:
+        logger.warning(f"Error en liquidación de arranque: {e}")
+
+    # 3. Cron Scheduler
     scheduler = BackgroundScheduler()
 
-    # Escaneo + envío automático de picks (refresca cuotas justo antes de predecir):
-    # 10:00 UTC (05:00 COL) → picks europeos del día
+    # Ingesta periódica de cuotas frescas cada 4 horas
+    scheduler.add_job(job_harvest, CronTrigger(hour="*/4", minute="5"))
+
+    # Escaneos automáticos de picks en ventanas estratégicas (hora Colombia: -5h UTC):
+    # 10:00 UTC (05:00 COL) -> Jornada de mañana/tarde europea
     scheduler.add_job(
         job_auto_scan_and_send,
         CronTrigger(hour="10", minute="0"),
-        kwargs={"window_label": "mañana"}
+        kwargs={"window_label": "Mañana Europea"}
     )
-    # 17:00 UTC (12:00 COL) → picks NBA nocturnos + Europa tarde
+    # 16:00 UTC (11:00 COL) -> Tarde/Noche europea
     scheduler.add_job(
         job_auto_scan_and_send,
-        CronTrigger(hour="17", minute="0"),
-        kwargs={"window_label": "tarde"}
+        CronTrigger(hour="16", minute="0"),
+        kwargs={"window_label": "Tarde Europea"}
+    )
+    # 22:00 UTC (17:00 COL) -> NBA & Noche Americana
+    scheduler.add_job(
+        job_auto_scan_and_send,
+        CronTrigger(hour="22", minute="0"),
+        kwargs={"window_label": "Noche NBA"}
     )
 
-    # Liquidación de resultados (23:30 UTC / 18:30 COL)
-    scheduler.add_job(job_settlement, CronTrigger(hour="23", minute="30"))
+    # Liquidación de resultados cada 2 horas (00:30, 02:30, 04:30 ... UTC)
+    scheduler.add_job(job_settlement, CronTrigger(hour="*/2", minute="30"))
 
     scheduler.start()
-    logger.info("Scheduler optimizado activo: escaneos 10:00 y 17:00 UTC · Liquidación 23:30 UTC")
+    logger.info("Scheduler activo: Escaneos 10:00, 16:00 y 22:00 UTC · Liquidaciones cada 2h.")
 
-    # Notificación de arranque
+    # Notificación de arranque operativo a Telegram
     bank = get_current_bankroll()
     send_telegram_raw(
-        f"🤖 *Bot de Pronósticos · Versión Actualizada (v2.4.1)*\n"
+        f"🚀 *Bot de Pronósticos Multideporte Activo (v3.0.0)*\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"• Estado: `24/7 Cloud (Render)`\n"
-        f"• Cobertura: *Fútbol (Top 5 Ligas) + NBA + Tenis*\n"
+        f"• Estado: `24/7 Cloud (Render + UptimeRobot)`\n"
+        f"• Cobertura: *Fútbol (Top 5 Ligas) + NBA + NFL + Tenis*\n"
+        f"• Motor: *Modelo Matemático EV+ & Quarter Kelly*\n"
         f"• Banca sincronizada: `${bank:,.2f}`\n"
-        f"• Escaneos automáticos: `10:00 y 17:00 UTC` (05:00 y 12:00 COL)\n"
-        f"• Liquidación automática: `23:30 UTC` (18:30 COL)\n"
+        f"• Escaneos automáticos: `10:00, 16:00 y 22:00 UTC`\n"
+        f"• Liquidación continua: `Cada 2 horas` vía ESPN API\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"✨ *Novedades de esta versión:*\n"
-        f"• `/picks`: Resumen del día corregido y activo.\n"
-        f"• Botones de apuesta ahora permiten cambiar de opinión (`🔄`).\n"
-        f"• Cuota de API optimizada para rendir todo el mes.\n"
-        f"• Sincronización de marcadores en vivo 100% automatizada."
+        f"🎯 _Escribe /picks para consultar el resumen o emitir las mejores oportunidades de hoy._"
     )
 
-    # 3. Bot interactivo (hilo principal)
-    logger.info("Iniciando escucha de Telegram (comandos + botones)...")
+    # 4. Bot interactivo (hilo principal)
+    logger.info("Iniciando escucha de Telegram (comandos + callbacks)...")
     app = build_app()
     app.run_polling()
 

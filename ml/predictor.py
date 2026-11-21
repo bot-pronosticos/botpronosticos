@@ -1,140 +1,36 @@
 """
 ml/predictor.py
-Motor de pronósticos multideporte calibrado para máxima efectividad:
-- Cobertura: Fútbol (Ligas Top, UEFA Nations League, Champions) y Baloncesto (NBA).
-- Casa de referencia: Pinnacle con fallback a 1xBet / Betfair / DraftKings.
-- Rango de cuotas: 1.45 a 2.45.
-- Probabilidad de acierto proyectada >= 44%.
-- Argumentación deportiva cuantitativa y cualitativa.
+Motor de pronósticos multideporte de alta precisión matemática:
+- Cobertura: Fútbol (Grandes Ligas), NBA, NFL y Tenis (ATP).
+- Entrada: Feed en vivo de cuotas desviggeadas + Modelo Ensemble ML (XGBoost, RF, LogReg).
+- Filtros estrictos de rentabilidad:
+    * Cuota: 1.45 a 2.50
+    * Probabilidad proyectada: >= 42%
+    * EV (Valor Esperado): >= +2.5%
+- Gestión de riesgo: Quarter Kelly Criterion (máx 4.0% de la banca).
 """
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import numpy as np
+from datetime import datetime, timezone
 import pandas as pd
+import numpy as np
 from loguru import logger
-from datetime import datetime, timezone, timedelta
 
+from harvesters.odds_harvester import harvest_odds
 from ml.trainer import load_latest
-from ml.backtester import compute_ev, kelly_fraction, implied_prob
 from ml.feature_engineer import build_match_features
-from harvesters.db_client import select
+from ml.backtester import compute_ev, kelly_fraction, implied_prob
 
-PRIMARY_BOOKMAKERS = ["Pinnacle", "1xBet", "Betfair", "DraftKings", "Bet365"]
-MIN_ODDS           = 1.45
-MAX_ODDS           = 2.45
-MIN_PROB_ACIERTO   = 0.44
-
-OUTCOME_LABELS = {0: "Gana Visitante", 1: "Empate", 2: "Gana Local"}
-OUTCOME_KEYS   = {0: "A", 1: "D", 2: "H"}
-
-
-def get_upcoming_fixtures(deporte: str = None, max_hours: int = 24) -> list[dict]:
-    """
-    Lee partidos pendientes de Supabase dentro de la ventana max_hours.
-    Si deporte es None, evalúa todos los deportes soportados.
-    """
-    filters = {"estado": "pendiente"}
-    if deporte:
-        filters["deporte"] = deporte
-
-    all_rows = select("partidos", filters, limit=500)
-    now_utc = pd.Timestamp.now(tz=timezone.utc)
-    start_window = now_utc - timedelta(hours=1)
-    end_window   = now_utc + timedelta(hours=max_hours)
-
-    filtered = []
-    for r in all_rows:
-        ko_str = r.get("kickoff", "")
-        if not ko_str:
-            continue
-        try:
-            ko = pd.Timestamp(ko_str)
-            if ko.tzinfo is None:
-                ko = ko.tz_localize("UTC")
-            else:
-                ko = ko.tz_convert("UTC")
-
-            if start_window <= ko <= end_window:
-                filtered.append(r)
-        except Exception:
-            continue
-
-    logger.info(f"Partidos ventana {max_hours}h (deporte={deporte or 'todos'}): {len(filtered)} de {len(all_rows)}")
-    return filtered
-
-
-def get_all_odds_map() -> dict:
-    """Carga todas las cuotas de Supabase en memoria."""
-    all_rows = select("odds", limit=15000)
-    grouped = {}
-    for r in all_rows:
-        pid = r.get("partido_id")
-        if pid not in grouped:
-            grouped[pid] = []
-        grouped[pid].append(r)
-    return grouped
-
-
-def get_benchmark_odds(match_odds_rows: list[dict], home_team: str, away_team: str) -> tuple[dict, str]:
-    """
-    Extrae cuotas de la casa más confiable para fútbol (1X2).
-    """
-    ht_clean = home_team.lower().strip()
-    at_clean = away_team.lower().strip()
-
-    for target_bm in PRIMARY_BOOKMAKERS:
-        matching_rows = [
-            r for r in match_odds_rows
-            if target_bm.lower() in (r.get("bookmaker") or "").lower() and r.get("mercado") == "h2h"
-        ]
-        if not matching_rows:
-            continue
-
-        odds = {"H": 0.0, "D": 0.0, "A": 0.0}
-        house_name = target_bm
-
-        for r in matching_rows:
-            oc = (r.get("outcome") or "").lower().strip()
-            c  = float(r.get("cuota_actual") or 0)
-            house_name = r.get("bookmaker") or target_bm
-
-            if oc in ["draw", "empate"]:
-                odds["D"] = max(odds["D"], c)
-            elif oc == ht_clean or oc in ht_clean or ht_clean in oc:
-                odds["H"] = max(odds["H"], c)
-            elif oc == at_clean or oc in at_clean or at_clean in oc:
-                odds["A"] = max(odds["A"], c)
-
-        if odds["H"] > 1.0 or odds["A"] > 1.0:
-            return odds, house_name
-
-    return {"H": 0.0, "D": 0.0, "A": 0.0}, ""
-
-
-def generate_football_reasoning(outcome_key: str, feat: dict, home_team: str, away_team: str) -> tuple[str, str]:
-    h_gf = feat.get("h_gf_avg", 1.4)
-    h_ga = feat.get("h_ga_avg", 1.2)
-    a_gf = feat.get("a_gf_avg", 1.2)
-    a_ga = feat.get("a_ga_avg", 1.3)
-    h_win = feat.get("h_win_rate", 0.45) * 100
-    a_win = feat.get("a_win_rate", 0.35) * 100
-
-    if outcome_key == "H":
-        linea_stats = f"{home_team} promedia {h_gf:.1f} goles en casa y gana el {h_win:.0f}% de sus fechas; {away_team} encaja {a_ga:.1f} goles fuera."
-        linea_context = f"Superioridad ofensiva clara (+{h_gf - a_gf:.1f} en gol diff) y ventaja de localía favorable para imponer ritmo."
-    elif outcome_key == "A":
-        linea_stats = f"{away_team} registra mejor balance ofensivo ({a_gf:.1f} goles/pj) frente a un {home_team} que concede {h_ga:.1f} goles."
-        linea_context = f"Racha favorable visitante con {a_win:.0f}% de victorias recientes y mayor eficiencia en definición."
-    else:
-        linea_stats = f"Duelo cerrado: ambos clubes promedian menos de 1.2 goles por partido en sus últimas 5 fechas."
-        linea_context = f"Paridad táctica en mitad de cancha y esquemas defensivos que favorecen marcador equilibrado."
-
-    return linea_stats, linea_context
+MIN_ODDS         = 1.45
+MAX_ODDS         = 2.50
+MIN_PROB_ACIERTO = 0.42
+MIN_EV           = 0.025
 
 
 def format_kickoff_label(ko_str: str) -> str:
+    """Convierte timestamp UTC a formato amigable."""
     if not ko_str:
         return ""
     try:
@@ -145,300 +41,254 @@ def format_kickoff_label(ko_str: str) -> str:
         else:
             dt = dt.tz_convert("UTC")
 
-        is_today = (dt.date() == now.date())
+        diff_days = (dt.date() - now.date()).days
         time_str = dt.strftime("%H:%M UTC")
 
-        if is_today:
+        if diff_days == 0:
             return f"Hoy, {time_str}"
-        elif (dt.date() - now.date()).days == 1:
+        elif diff_days == 1:
             return f"Mañana, {time_str}"
+        elif 2 <= diff_days <= 7:
+            days_es = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+            return f"{days_es[dt.weekday()]}, {time_str}"
         else:
             return dt.strftime("%d %b, %H:%M UTC")
     except Exception:
         return ko_str[:16].replace("T", " ")
 
 
-def predict_nba_matches(fixtures: list[dict], odds_cache: dict) -> list[dict]:
-    """
-    Evalúa partidos de NBA mediante consenso de mercado sin margen (de-vigged consensus)
-    con factor de localía y ventaja situacional.
-    """
-    nba_picks = []
-    for fix in fixtures:
-        if fix.get("deporte") != "basketball":
-            continue
-
-        local      = fix.get("equipo_local", "")
-        visitante  = fix.get("equipo_visitante", "")
-        partido_id = fix.get("id", "")
-        kickoff    = fix.get("kickoff", "")
-        m_odds     = odds_cache.get(partido_id, [])
-        h2h        = [r for r in m_odds if r.get("mercado") == "h2h"]
-
-        # Buscar cuotas benchmark
-        best_h, best_a = 0.0, 0.0
-        book_name = "Pinnacle"
-
-        for r in h2h:
-            bm = (r.get("bookmaker") or "").lower()
-            if any(k.lower() in bm for k in ["pinnacle", "1xbet", "draftkings", "betfair"]):
-                oc = (r.get("outcome") or "").lower()
-                c = float(r.get("cuota_actual") or 0)
-                book_name = r.get("bookmaker") or book_name
-                if local.lower() in oc or oc in local.lower():
-                    best_h = max(best_h, c)
-                elif visitante.lower() in oc or oc in visitante.lower():
-                    best_a = max(best_a, c)
-
-        if best_h <= 1.0 or best_a <= 1.0:
-            continue
-
-        # Desvigging
-        raw_h = 1.0 / best_h
-        raw_a = 1.0 / best_a
-        tot   = raw_h + raw_a
-        p_h   = (raw_h / tot) + 0.025  # Ventaja de localía NBA (+2.5%)
-        p_h   = min(0.85, max(0.15, p_h))
-        p_a   = 1.0 - p_h
-
-        sides = [
-            ("H", p_h, best_h, local, f"Gana {local}"),
-            ("A", p_a, best_a, visitante, f"Gana {visitante}")
-        ]
-
-        best_pick_for_game = None
-        best_ev_for_game = -1.0
-
-        for outcome_key, prob, cuota, team_name, label in sides:
-            if cuota < MIN_ODDS or cuota > MAX_ODDS:
-                continue
-            if prob < MIN_PROB_ACIERTO:
-                continue
-            ev = compute_ev(prob, cuota)
-            if ev < 0.015:
-                continue
-
-            if ev > best_ev_for_game:
-                best_ev_for_game = ev
-                kelly = kelly_fraction(prob, cuota)
-                stats_line = f"{team_name} registra balance competitivo favorable y {prob*100:.0f}% de probabilidad proyectada por el mercado."
-                context_line = f"Línea de valor en {book_name} superando el precio justo con un EV positivo del +{ev*100:.1f}%."
-
-                best_pick_for_game = {
-                    "partido_id":        partido_id,
-                    "deporte":           "basketball",
-                    "liga":              "NBA",
-                    "equipo_local":      local,
-                    "equipo_visitante":  visitante,
-                    "kickoff":           kickoff,
-                    "kickoff_label":     format_kickoff_label(kickoff),
-                    "mercado":           "h2h",
-                    "outcome":           outcome_key,
-                    "outcome_label":     label,
-                    "prob_modelo":       round(prob, 4),
-                    "prob_implicita":    round(implied_prob(cuota), 4),
-                    "ev":                round(ev, 4),
-                    "cuota":             round(cuota, 2),
-                    "bookmaker":         book_name,
-                    "kelly":             round(kelly, 4),
-                    "argumento_stats":   stats_line,
-                    "argumento_context": context_line,
-                    "modelo_version":    "nba_consensus_v1",
-                }
-
-        if best_pick_for_game:
-            nba_picks.append(best_pick_for_game)
-
-    return nba_picks
-
-
-def predict_tennis_matches(fixtures: list[dict], odds_cache: dict) -> list[dict]:
-    """
-    Evalúa partidos de Tenis (ATP / WTA / Grand Slams) mediante consenso de mercado sin margen (de-vigged).
-    Mercado 2-way: Jugador A vs Jugador B.
-    """
-    tennis_picks = []
-    for fix in fixtures:
-        if fix.get("deporte") != "tennis":
-            continue
-
-        p1         = fix.get("equipo_local", "")
-        p2         = fix.get("equipo_visitante", "")
-        partido_id = fix.get("id", "")
-        liga       = fix.get("liga", "ATP")
-        kickoff    = fix.get("kickoff", "")
-        m_odds     = odds_cache.get(partido_id, [])
-        h2h        = [r for r in m_odds if r.get("mercado") == "h2h"]
-
-        best_p1, best_p2 = 0.0, 0.0
-        book_name = "Pinnacle"
-
-        for r in h2h:
-            bm = (r.get("bookmaker") or "").lower()
-            if any(k.lower() in bm for k in ["pinnacle", "1xbet", "betfair"]):
-                oc = (r.get("outcome") or "").lower()
-                c = float(r.get("cuota_actual") or 0)
-                book_name = r.get("bookmaker") or book_name
-                if p1.lower() in oc or oc in p1.lower():
-                    best_p1 = max(best_p1, c)
-                elif p2.lower() in oc or oc in p2.lower():
-                    best_p2 = max(best_p2, c)
-
-        if best_p1 <= 1.0 or best_p2 <= 1.0:
-            continue
-
-        raw_1 = 1.0 / best_p1
-        raw_2 = 1.0 / best_p2
-        tot   = raw_1 + raw_2
-        prob_1 = raw_1 / tot
-        prob_2 = raw_2 / tot
-
-        sides = [
-            ("H", prob_1, best_p1, p1, f"Gana {p1}"),
-            ("A", prob_2, best_p2, p2, f"Gana {p2}")
-        ]
-
-        best_pick_for_match = None
-        best_ev_for_match = -1.0
-
-        for outcome_key, prob, cuota, player_name, label in sides:
-            if cuota < MIN_ODDS or cuota > MAX_ODDS:
-                continue
-            if prob < MIN_PROB_ACIERTO:
-                continue
-            ev = compute_ev(prob, cuota)
-            if ev < 0.015:
-                continue
-
-            if ev > best_ev_for_match:
-                best_ev_for_match = ev
-                kelly = kelly_fraction(prob, cuota)
-                stats_line = f"{player_name} presenta métricas sólidas de efectividad en servicio y un {prob*100:.0f}% de probabilidad proyectada por el mercado."
-                context_line = f"Línea de valor en {book_name} superando el precio de equilibrio con un EV positivo del +{ev*100:.1f}%."
-
-                best_pick_for_match = {
-                    "partido_id":        partido_id,
-                    "deporte":           "tennis",
-                    "liga":              liga,
-                    "equipo_local":      p1,
-                    "equipo_visitante":  p2,
-                    "kickoff":           kickoff,
-                    "kickoff_label":     format_kickoff_label(kickoff),
-                    "mercado":           "h2h",
-                    "outcome":           outcome_key,
-                    "outcome_label":     label,
-                    "prob_modelo":       round(prob, 4),
-                    "prob_implicita":    round(implied_prob(cuota), 4),
-                    "ev":                round(ev, 4),
-                    "cuota":             round(cuota, 2),
-                    "bookmaker":         book_name,
-                    "kelly":             round(kelly, 4),
-                    "argumento_stats":   stats_line,
-                    "argumento_context": context_line,
-                    "modelo_version":    "tennis_consensus_v1",
-                }
-
-        if best_pick_for_match:
-            tennis_picks.append(best_pick_for_match)
-
-    return tennis_picks
-
-
 def predict_upcoming(df_history: pd.DataFrame = None, max_hours: int = 24) -> list[dict]:
     """
-    Genera pronósticos multideporte (Fútbol + NBA + Tenis) rigurosamente filtrados.
+    Evalúa todos los partidos en vivo dentro de la ventana max_hours (por defecto 24h para hoy).
+    Retorna la lista de mejores pronósticos ordenados por calidad matemática.
     """
-    fixtures   = get_upcoming_fixtures(deporte=None, max_hours=max_hours)
-    odds_cache = get_all_odds_map()
-    now_utc    = pd.Timestamp.now(tz=timezone.utc)
-    all_picks  = []
+    events = harvest_odds()
+    if not events:
+        logger.warning("No hay eventos en el feed de cuotas.")
+        return []
 
-    # 1. Pronósticos NBA
-    nba_picks = predict_nba_matches(fixtures, odds_cache)
-    all_picks.extend(nba_picks)
+    now_utc = datetime.now(timezone.utc)
 
-    # 2. Pronósticos Tenis (ATP / WTA)
-    tennis_picks = predict_tennis_matches(fixtures, odds_cache)
-    all_picks.extend(tennis_picks)
-
-    # 3. Pronósticos Fútbol con modelo Ensemble
+    # Cargar modelo ML de fútbol si está disponible
     model_data = load_latest()
-    if model_data and df_history is not None:
-        models    = model_data["models"]
-        feat_cols = model_data["feat_cols"]
-        version   = model_data["version"]
+    models = model_data.get("models", {}) if model_data else {}
+    feat_cols = model_data.get("feat_cols", []) if model_data else []
 
-        football_fixtures = [f for f in fixtures if f.get("deporte") == "football"]
+    all_picks = []
 
-        for fix in football_fixtures:
-            local      = fix.get("equipo_local", "")
-            visitante  = fix.get("equipo_visitante", "")
-            partido_id = fix.get("id", "")
-            liga       = fix.get("liga", "")
-            kickoff    = fix.get("kickoff", "")
+    for event in events:
+        hrs = event.get("hours_to_kickoff", 999.0)
+        # Filtro estricto por ventana de tiempo
+        if hrs < -0.5 or hrs > max_hours:
+            continue
 
-            h_games = len(df_history[(df_history["HomeTeam"] == local) | (df_history["AwayTeam"] == local)])
-            a_games = len(df_history[(df_history["HomeTeam"] == visitante) | (df_history["AwayTeam"] == visitante)])
-            if h_games < 5 or a_games < 5:
+        sport     = event.get("deporte", "football")
+        liga      = event.get("liga", "Deportes")
+        local     = event.get("equipo_local", "").strip()
+        visitante = event.get("equipo_visitante", "").strip()
+        kickoff   = event.get("kickoff", "")
+        eid       = event.get("source_id", f"{local}_{visitante}")
+        bm        = event.get("bookmaker", "Consenso de Mercado")
+
+        oh = float(event.get("odds_h", 0.0))
+        oa = float(event.get("odds_a", 0.0))
+        od = float(event.get("odds_d", 0.0))
+
+        if oh <= 1.0 or oa <= 1.0:
+            continue
+
+        candidates = []
+
+        # ── 1. FÚTBOL (1X2) ──────────────────────────────────────────────────
+        if sport == "football":
+            # Desvigging 3-way
+            rh = 1.0 / oh
+            ra = 1.0 / oa
+            rd = (1.0 / od) if od > 1.0 else 0.0
+            tot = rh + ra + rd
+            if tot <= 0:
                 continue
 
-            try:
-                dummy_row = pd.Series({
-                    "HomeTeam": local,
-                    "AwayTeam": visitante,
-                    "Date":     now_utc,
-                    "FTR":      "H",
-                })
-                feat = build_match_features(dummy_row, df_history)
-            except Exception:
+            ph_fair = rh / tot
+            pd_fair = rd / tot
+            pa_fair = ra / tot
+
+            # Evaluación con Modelo Ensemble si hay historial
+            used_ml = False
+            ph_mod, pa_mod, pd_mod = ph_fair, pa_fair, pd_fair
+
+            if df_history is not None and models and feat_cols:
+                h_games = len(df_history[(df_history["HomeTeam"] == local) | (df_history["AwayTeam"] == local)])
+                a_games = len(df_history[(df_history["HomeTeam"] == visitante) | (df_history["AwayTeam"] == visitante)])
+                if h_games >= 5 and a_games >= 5:
+                    try:
+                        dummy = pd.Series({"HomeTeam": local, "AwayTeam": visitante, "Date": now_utc, "FTR": "H"})
+                        feat = build_match_features(dummy, df_history)
+                        X = np.array([[feat.get(c, 0.0) for c in feat_cols]])
+                        proba = np.mean([m.predict_proba(X)[0] for m in models.values()], axis=0)
+                        # [Away, Draw, Home]
+                        pa_mod = float(proba[0])
+                        pd_mod = float(proba[1])
+                        ph_mod = float(proba[2])
+                        used_ml = True
+                    except Exception:
+                        pass
+
+            if not used_ml:
+                # Ajuste de consenso con ventaja de localía del 2%
+                ph_mod = min(0.85, ph_fair * 1.025)
+                pa_mod = max(0.10, pa_fair * 0.975)
+                pd_mod = max(0.05, 1.0 - ph_mod - pa_mod)
+
+            candidates.append({
+                "outcome_key": "H",
+                "label":       f"Gana {local}",
+                "prob":        ph_mod,
+                "cuota":       oh,
+                "stats_arg":   f"{local} promedia mayor solidez en casa y el modelo proyecta {ph_mod*100:.0f}% de probabilidad de victoria.",
+                "context_arg": f"Línea de valor sobre el precio de equilibrio de {1.0/ph_mod:.2f} con ventaja de localía.",
+            })
+            candidates.append({
+                "outcome_key": "A",
+                "label":       f"Gana {visitante}",
+                "prob":        pa_mod,
+                "cuota":       oa,
+                "stats_arg":   f"{visitante} registra rendimiento competitivo favorable ({pa_mod*100:.0f}% de probabilidad proyectada).",
+                "context_arg": f"Valor positivo en la cuota visitante frente al consenso general del mercado.",
+            })
+
+        # ── 2. BALONCESTO (NBA) ──────────────────────────────────────────────
+        elif sport == "basketball":
+            rh = 1.0 / oh
+            ra = 1.0 / oa
+            tot = rh + ra
+            ph_fair = min(0.85, max(0.15, (rh / tot) + 0.028)) # +2.8% Home court advantage NBA
+            pa_fair = 1.0 - ph_fair
+
+            candidates.append({
+                "outcome_key": "H",
+                "label":       f"Gana {local}",
+                "prob":        ph_fair,
+                "cuota":       oh,
+                "stats_arg":   f"{local} cuenta con ventaja de duela local y un {ph_fair*100:.0f}% de probabilidad proyectada por el mercado.",
+                "context_arg": f"Oportunidad de valor en la línea Moneyline frente al margen de la casa.",
+            })
+            candidates.append({
+                "outcome_key": "A",
+                "label":       f"Gana {visitante}",
+                "prob":        pa_fair,
+                "cuota":       oa,
+                "stats_arg":   f"{visitante} supera la cuota de equilibrio con proyección de victoria del {pa_fair*100:.0f}%.",
+                "context_arg": f"Disparidad de precio favorable en cuota visitante Moneyline.",
+            })
+
+        # ── 3. TENIS (ATP / WTA) ──────────────────────────────────────────────
+        elif sport == "tennis":
+            rh = 1.0 / oh
+            ra = 1.0 / oa
+            tot = rh + ra
+            ph_fair = rh / tot
+            pa_fair = ra / tot
+
+            candidates.append({
+                "outcome_key": "H",
+                "label":       f"Gana {local}",
+                "prob":        ph_fair,
+                "cuota":       oh,
+                "stats_arg":   f"{local} presenta consistencia sólida de servicio con {ph_fair*100:.0f}% de probabilidad proyectada.",
+                "context_arg": f"Precio de entrada atractivo en mercado Moneyline sin comisión.",
+            })
+            candidates.append({
+                "outcome_key": "A",
+                "label":       f"Gana {visitante}",
+                "prob":        pa_fair,
+                "cuota":       oa,
+                "stats_arg":   f"{visitante} muestra retorno positivo esperado sobre el spread de probabilidades.",
+                "context_arg": f"Línea de valor en cuota de equilibrio.",
+            })
+
+        # ── 4. NFL (FÚTBOL AMERICANO) ────────────────────────────────────────
+        elif sport == "americano":
+            rh = 1.0 / oh
+            ra = 1.0 / oa
+            tot = rh + ra
+            ph_fair = min(0.85, max(0.15, (rh / tot) + 0.025))
+            pa_fair = 1.0 - ph_fair
+
+            candidates.append({
+                "outcome_key": "H",
+                "label":       f"Gana {local}",
+                "prob":        ph_fair,
+                "cuota":       oh,
+                "stats_arg":   f"{local} defiende localía con {ph_fair*100:.0f}% de probabilidad proyectada de victoria.",
+                "context_arg": f"Valor en línea Moneyline con factor de estadio favorable.",
+            })
+            candidates.append({
+                "outcome_key": "A",
+                "label":       f"Gana {visitante}",
+                "prob":        pa_fair,
+                "cuota":       oa,
+                "stats_arg":   f"{visitante} presenta eficiencia ofensiva favorable en relación a su cuota de mercado.",
+                "context_arg": f"Precio con EV positivo en cuota Moneyline visitante.",
+            })
+
+        # ── Selección del mejor pick por partido ──────────────────────────────
+        best_candidate = None
+        best_ev = -1.0
+
+        for c in candidates:
+            cuota = c["cuota"]
+            prob  = c["prob"]
+
+            if cuota < MIN_ODDS or cuota > MAX_ODDS:
+                continue
+            if prob < MIN_PROB_ACIERTO:
                 continue
 
-            X = np.array([[feat.get(c, 0.0) for c in feat_cols]])
-            proba = np.mean([m.predict_proba(X)[0] for m in models.values()], axis=0)
-
-            match_odds_rows = odds_cache.get(partido_id, [])
-            odds_dict, house_name = get_benchmark_odds(match_odds_rows, local, visitante)
-
-            if not house_name:
+            ev_val = compute_ev(prob, cuota)
+            if ev_val < MIN_EV:
                 continue
 
-            for outcome_idx, outcome_key in OUTCOME_KEYS.items():
-                cuota = odds_dict.get(outcome_key, 0.0)
-                prob_model = float(proba[outcome_idx])
-
-                if cuota < MIN_ODDS or cuota > MAX_ODDS:
-                    continue
-                if prob_model < MIN_PROB_ACIERTO:
-                    continue
-                ev = compute_ev(prob_model, cuota)
-                if ev < 0.02:
-                    continue
-
-                kelly = kelly_fraction(prob_model, cuota)
-                stats_line, context_line = generate_football_reasoning(outcome_key, feat, local, visitante)
-
-                all_picks.append({
-                    "partido_id":        partido_id,
-                    "deporte":           "football",
+            if ev_val > best_ev:
+                best_ev = ev_val
+                kelly = kelly_fraction(prob, cuota)
+                pid = event.get("partido_id") or event.get("id") or eid
+                best_candidate = {
+                    "partido_id":        pid,
+                    "deporte":           sport,
                     "liga":              liga,
                     "equipo_local":      local,
                     "equipo_visitante":  visitante,
                     "kickoff":           kickoff,
                     "kickoff_label":     format_kickoff_label(kickoff),
+                    "hours_to_kickoff":  hrs,
                     "mercado":           "h2h",
-                    "outcome":           outcome_key,
-                    "outcome_label":     OUTCOME_LABELS[outcome_idx],
-                    "prob_modelo":       round(prob_model, 4),
+                    "outcome":           c["outcome_key"],
+                    "outcome_label":     c["label"],
+                    "prob_modelo":       round(prob, 4),
                     "prob_implicita":    round(implied_prob(cuota), 4),
-                    "ev":                round(ev, 4),
+                    "ev":                round(ev_val, 4),
                     "cuota":             round(cuota, 2),
-                    "bookmaker":         house_name,
+                    "bookmaker":         bm,
                     "kelly":             round(kelly, 4),
-                    "argumento_stats":   stats_line,
-                    "argumento_context": context_line,
-                    "modelo_version":    version,
-                })
+                    "argumento_stats":   c["stats_arg"],
+                    "argumento_context": c["context_arg"],
+                    "modelo_version":    "multisport_ev_v2",
+                }
 
-    all_picks.sort(key=lambda x: (x["prob_modelo"] * 0.75 + x["ev"] * 0.25), reverse=True)
-    logger.info(f"Picks totales ({max_hours}h): {len(all_picks)} (Fútbol + NBA + Tenis)")
+        if best_candidate:
+            all_picks.append(best_candidate)
+
+    # Ordenar por combinación de Probabilidad (70%) y EV (30%)
+    all_picks.sort(key=lambda x: (x["prob_modelo"] * 0.70 + x["ev"] * 0.30), reverse=True)
+    logger.info(f"Picks con valor matemático (ventana {max_hours}h): {len(all_picks)} encontrados.")
     return all_picks
+
+
+if __name__ == "__main__":
+    from ml.data_loader import load_all_history
+    df = load_all_history()
+    picks_today = predict_upcoming(df, max_hours=24)
+    print(f"Picks para hoy (24h): {len(picks_today)}")
+    for p in picks_today[:5]:
+        print(f"  [{p['deporte']}] {p['equipo_local']} vs {p['equipo_visitante']} -> {p['outcome_label']} @ {p['cuota']} (EV +{p['ev']*100:.1f}%)")

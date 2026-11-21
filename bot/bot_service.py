@@ -125,13 +125,20 @@ async def picks_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 2. Consultar picks en BD cuyo kickoff sea efectivamente HOY (ventana 24h)
         all_picks_db = select("picks", limit=500)
-        partidos_db = {p["id"]: p for p in select("partidos", limit=500)}
+        partidos_db = {p["id"]: p for p in select("partidos", limit=1000)}
         now_utc = pd.Timestamp.now(tz="UTC")
         today_str = now_utc.strftime("%Y-%m-%d")
 
         today_active_picks = []
         for p in all_picks_db:
-            partido = partidos_db.get(p.get("partido_id"))
+            pid = p.get("partido_id")
+            partido = partidos_db.get(pid)
+            if not partido and pid:
+                fetched = select("partidos", {"id": pid}, limit=1)
+                if fetched:
+                    partido = fetched[0]
+                    partidos_db[pid] = partido
+
             if not partido:
                 continue
             ko_str = partido.get("kickoff", "")
